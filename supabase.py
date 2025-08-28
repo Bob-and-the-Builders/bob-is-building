@@ -7,4 +7,10 @@ class SupabaseDB:
         self.SUPABASE_SECRET = os.environ["SUPABASE_ANON_KEY"]
         self.client = create_client(self.SUPABASE_URL, self.SUPABASE_SECRET)
 
-    
+    def get_table(self, table: str):
+        """Fetch all rows from a table."""
+        return self.client.table(table).select("*").execute().data
+
+    def insert(self, table: str, row: dict):
+        """Insert a row into a table."""
+        return self.client.table(table).insert(row).execute().data
