@@ -10,6 +10,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Ensure session state key exists early to avoid KeyError on first load
+if 'user' not in st.session_state:
+    st.session_state['user'] = None
+
 def sign_up(email: str, password: str):
     try:
         user = supabase.auth.sign_up({"email": email, "password": password})
@@ -84,8 +88,7 @@ def main():
         
 
 if __name__ == "__main__":
-    print(st.session_state['user'])
-    # Check if user is already logged in
+    # Check if user is already logged in (ensured above as well)
     if 'user' not in st.session_state:
         st.session_state['user'] = None
     
