@@ -103,12 +103,46 @@ def report_cleanliness(reports: List[Dict], vts_map: Dict[str, float]) -> float:
     return float(max(0.0, 100.0 - penalty))
 
 def authentic_engagement(features: Dict[str, float]) -> float:
-    # Diagram schema lacks watch-duration; rely on like/comment rates only
+    # Like/comment rates
     lpv = float(features.get("likes_per_view", 0.0) or 0.0)
     cpv = float(features.get("comments_per_view", 0.0) or 0.0)
-    s_like = min(100.0, 100.0 * lpv / 0.1)   # ~0.1 good
-    s_comm = min(100.0, 100.0 * cpv / 0.02)  # ~0.02 good
-    return float(0.6 * s_like + 0.4 * s_comm)
+
+    # Adaptive targets based on optional metadata
+    duration = features.get("video_duration_s")
+    fps = features.get("fps")
+    has_audio = features.get("has_audio")
+
+    # Baselines
+    like_target = 0.10
+    comment_target = 0.02
+
+    # Duration scaling: shorter videos tend to concentrate engagement
+    if isinstance(duration, (int, float)) and duration and duration > 0:
+        dur_scale = max(0.7, min(1.3, 15.0 / float(duration)))
+        like_target *= dur_scale
+        comment_target *= dur_scale
+
+    # FPS scaling: very low fps likely reduces quality/engagement expectations
+    if isinstance(fps, (int, float)) and fps and fps > 0:
+        fps_scale = max(0.8, min(1.2, float(fps) / 30.0))
+        like_target *= fps_scale
+        comment_target *= fps_scale
+
+    # Normalize to 0..100 with adaptive targets
+    s_like = 100.0 * lpv / max(1e-6, like_target)
+    s_comm = 100.0 * cpv / max(1e-6, comment_target)
+
+    # Cap scores
+    s_like = min(100.0, s_like)
+    s_comm = min(100.0, s_comm)
+
+    base = 0.6 * s_like + 0.4 * s_comm
+
+    # Small audio bonus
+    if isinstance(has_audio, bool) and has_audio:
+        base += 5.0
+
+    return float(max(0.0, min(100.0, base)))
 
 def eis_score(ae: float, cq: float, li: float, rc: float) -> float:
     # Weighted blend
