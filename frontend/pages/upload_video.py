@@ -3,31 +3,16 @@ import tempfile
 from datetime import datetime
 
 import streamlit as st
-from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import Client
 
 # Optional: moviepy for metadata extraction
 from moviepy import VideoFileClip
 
-load_dotenv()
-
 st.set_page_config(page_title="Upload Video", page_icon="📹")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-# Prefer ANON key; keep compatibility with existing env
-SUPABASE_KEY = os.getenv("SUPABASE_SECRET") or os.getenv("SUPABASE_KEY")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = st.session_state.get("supabase")
 
 st.title("📹 Upload a Video")
-
-# Use the logged-in user's token so RLS applies correctly
-access_token = st.session_state.get("access_token")
-if access_token:
-    try:
-        supabase.postgrest.auth(access_token)
-    except Exception:
-        pass
 
 # Auth gate
 user = st.session_state.get("user")
@@ -37,26 +22,8 @@ if not user:
 else:
     st.info("You are logged in as: {}".format(user.email))
 
-def get_creator_id_from_email(email: str) -> int | None:
-    """SELECT user_id FROM user_info WHERE email = <email>"""
-    if not email:
-        return None
-    try:
-        res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
-        if res and getattr(res, "data", None):
-            return res.data.get("user_id")
-    except Exception as e:
-        st.warning(f"Could not resolve creator_id from user_info: {e}")
-    return None
-
 # Resolve creator_id via user_info
-creator_id_lookup = get_creator_id_from_email(getattr(user, "email", None))
-if creator_id_lookup is None:
-    # Fallback to auth user id if no user_info row is found
-    creator_id_lookup = getattr(user, "id", None)
-    if creator_id_lookup is None:
-        st.error("Unable to determine creator_id. Please ensure your user has a user_info row.")
-        st.stop()
+creator_id_lookup = st.session_state.get("creator_id")
 
 uploaded_file = st.file_uploader(
     "Choose a video file",
