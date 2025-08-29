@@ -14,22 +14,6 @@ if not user:
     st.info("Please sign in on the main page to upload a video.")
     st.stop()
 
-
-def get_creator_id_from_email(email: str) -> int | None:
-    """SELECT user_id FROM user_info WHERE email = <email>"""
-    if not email:
-        return None
-    try:
-        res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
-        if res and getattr(res, "data", None):
-            return res.data.get("user_id")
-    except Exception as e:
-        st.warning(f"Could not resolve creator_id from user_info: {e}")
-    return None
-
-
-
-
 @st.cache_data(ttl=600)
 def get_creator_data(user_id: int):
     """
@@ -92,7 +76,7 @@ def get_creator_data(user_id: int):
 
 
 # Fetch and load data for the current user
-user_id = get_creator_id_from_email(getattr(user, "email", None))
+user_id = st.session_state['creator_id']
 data = get_creator_data(user_id)
 
 if not data:

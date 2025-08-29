@@ -15,18 +15,6 @@ if not user:
     st.info("Please sign in on the main page to view your payout information.")
     st.stop()
 
-# --- Helper Function to get user_id (same as dashboard) ---
-def get_creator_id_from_email(email: str) -> int | None:
-    if not email:
-        return None
-    try:
-        res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
-        if res and getattr(res, "data", None):
-            return res.data.get("user_id")
-    except Exception as e:
-        st.warning(f"Could not resolve creator_id from user_info: {e}")
-    return None
-
 # --- New Data Fetching Function for Payouts ---
 @st.cache_data(ttl=600)
 def get_payout_data(user_id: int):
@@ -58,7 +46,7 @@ def get_payout_data(user_id: int):
         return None
 
 # --- Fetch and Load Data ---
-user_id = get_creator_id_from_email(getattr(user, "email", None))
+user_id = st.session_state['creator_id']
 payout_data = get_payout_data(user_id)
 
 if not payout_data:
