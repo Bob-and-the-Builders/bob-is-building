@@ -32,19 +32,22 @@ def analyze_window(video_id, start, end, use_semantics=False):
 
     # features (normalized rates)
     active_viewers = len({x["user_id"] for x in by["view"]}) or 1
-    total_views = len(by["view"]); likes=len(by["like"]); comments=len(by["comment"])
-    # Diagram schema has no metadata; set watch ratio neutral (0.0)
+    total_views = len(by["view"]); likes=len(by["like"]); comments=len(by["comment"]) 
+    # Diagram schema has no per-view watch metadata; set watch ratio neutral (0.0)
     avg_watch_ratio = 0.0
-    # Optional video metadata
-    duration_s = (
-        vid.get("duration_seconds")
-        or vid.get("duration_s")
-        or None
-    )
-    fps = vid.get("fps") or None
-    width = vid.get("width") or None
-    height = vid.get("height") or None
-    has_audio = vid.get("has_audio") if vid.get("has_audio") is not None else None
+    # Optional duration in schema
+    duration_s = vid.get("duration_s") or vid.get("duration_seconds") or None
+    # Device/IP concentration among likers (exposed for transparency)
+    like_devices = {}
+    like_ips = {}
+    for l in by["like"]:
+        if l.get("device_id"):
+            like_devices.setdefault(l["device_id"], set()).add(l["user_id"])
+        if l.get("ip_hash"):
+            like_ips.setdefault(l["ip_hash"], set()).add(l["user_id"])
+    likes_per_device = (sum(len(s) for s in like_devices.values()) / max(1, len(like_devices))) if like_devices else None
+    likes_per_ip = (sum(len(s) for s in like_ips.values()) / max(1, len(like_ips))) if like_ips else None
+
     feats = {
         "active_viewers": active_viewers,
         "total_views": total_views,
@@ -53,10 +56,8 @@ def analyze_window(video_id, start, end, use_semantics=False):
         "unique_commenters_rate": len({x["user_id"] for x in by["comment"]})/max(1,active_viewers),
         "avg_watch_ratio": float(avg_watch_ratio),
         "video_duration_s": float(duration_s) if duration_s is not None else None,
-        "fps": fps,
-        "width": width,
-        "height": height,
-        "has_audio": has_audio,
+        "likes_per_device": float(likes_per_device) if likes_per_device is not None else None,
+        "likes_per_ip": float(likes_per_ip) if likes_per_ip is not None else None,
     }
 
     # VTS map

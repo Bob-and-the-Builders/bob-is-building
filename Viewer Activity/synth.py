@@ -37,23 +37,24 @@ def seed_video(video_id: int = 10, creator_id: int = 1, duration_s: int = 15) ->
                 "id": video_id,
                 "creator_id": creator_id,
                 "title": "Latte Art Tips",
-                "duration_seconds": duration_s,
-                "fps": 30,
-                "width": 1080,
-                "height": 1920,
-                "has_audio": True,
+                "duration_s": duration_s,
             }
         ]
     ).execute()
 
 
-def _mk_event(video_id: int, user_id: int, event_type: str, ts: datetime):
-    return {
+def _mk_event(video_id: int, user_id: int, event_type: str, ts: datetime, device_id: str | None, ip_hash: str | None):
+    row = {
         "video_id": video_id,
         "user_id": user_id,
         "event_type": event_type,
         "ts": ts.isoformat(),
     }
+    if device_id:
+        row["device_id"] = device_id
+    if ip_hash:
+        row["ip_hash"] = ip_hash
+    return row
 
 
 def seed_events(video_id: int = 10, minutes: int = 5) -> int:
@@ -64,29 +65,41 @@ def seed_events(video_id: int = 10, minutes: int = 5) -> int:
         return 0
 
     events = []
+    # Assign per-user device/ip; create a small cluster to simulate abuse
+    user_device = {}
+    user_ip = {}
+    shared_device = "dev-shared-1"
+    shared_ip = "ip-shared-1"
+    for u in viewers:
+        if random.random() < 0.1:  # 10% of users share same device/ip (suspicious cluster)
+            user_device[u] = shared_device
+            user_ip[u] = shared_ip
+        else:
+            user_device[u] = f"dev-{u}"
+            user_ip[u] = f"ip-{u}"
     # Views for a subset of viewers
     view_sample = random.sample(viewers, k=max(1, int(0.6 * len(viewers))))
     for u in view_sample:
         ts = start + timedelta(seconds=random.randint(0, minutes * 60))
-        events.append(_mk_event(video_id, u, "view", ts))
+        events.append(_mk_event(video_id, u, "view", ts, user_device.get(u), user_ip.get(u)))
 
     # Likes from subset of viewers who viewed
     like_users = random.sample(view_sample, k=max(1, int(0.3 * len(view_sample))))
     for u in like_users:
         ts = start + timedelta(seconds=random.randint(0, minutes * 60))
-        events.append(_mk_event(video_id, u, "like", ts))
+        events.append(_mk_event(video_id, u, "like", ts, user_device.get(u), user_ip.get(u)))
 
     # Comments: include some spam/toxic for moderation
     comment_users = random.sample(view_sample, k=max(1, int(0.12 * len(view_sample))))
     for u in comment_users:
         ts = start + timedelta(seconds=random.randint(0, minutes * 60))
-        events.append(_mk_event(video_id, u, "comment", ts))
+        events.append(_mk_event(video_id, u, "comment", ts, user_device.get(u), user_ip.get(u)))
 
     # Reports: small fraction
     report_users = random.sample(view_sample, k=max(1, int(0.03 * len(view_sample))))
     for u in report_users:
         ts = start + timedelta(seconds=random.randint(0, minutes * 60))
-        events.append(_mk_event(video_id, u, "report", ts))
+        events.append(_mk_event(video_id, u, "report", ts, user_device.get(u), user_ip.get(u)))
 
     client.table("event").insert(events).execute()
     return len(events)
