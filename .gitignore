@@ -39,3 +39,12 @@ venv.bak/
 *.swp
 *.swo
 *~
+
+# Local run artifacts
+.streamlit/
+*.log
+*.sqlite
+*.db
+.DS_Store
+.pytest_cache/
+coverage/
