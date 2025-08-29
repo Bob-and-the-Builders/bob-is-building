@@ -1,24 +1,11 @@
-import os
 import streamlit as st
 import pandas as pd
 import numpy as np
-from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import Client
 
-# Load environment variables from .env file
-load_dotenv()
+st.set_page_config(page_title="Creator Dashboard", layout="wide")
 
-st.set_page_config(page_title="Creator Dashboard", page_icon="📊", layout="wide")
-
-# Supabase initialization
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception as e:
-    st.error(f"Failed to connect to Supabase: {e}")
-    supabase = None
+supabase: Client = st.session_state['supabase']
 
 st.title("Creator Dashboard")
 

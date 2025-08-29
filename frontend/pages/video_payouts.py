@@ -1,21 +1,11 @@
-import os
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import Client
 
 # --- Boilerplate and Supabase Initialization ---
-load_dotenv()
-st.set_page_config(page_title="Video Payouts", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Video Payouts", layout="wide")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception as e:
-    st.error(f"Failed to connect to Supabase: {e}")
-    supabase = None
+supabase: Client = st.session_state['supabase']
 
 st.title("💰 Video Payouts")
 

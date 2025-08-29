@@ -1,14 +1,9 @@
 import streamlit as st
-from supabase import create_client, Client
-from dotenv import load_dotenv
-import os
+from supabase import Client
 
-load_dotenv()
+st.set_page_config(layout="centered")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = st.session_state['supabase']
 
 def sign_up(email: str, password: str):
     try:
@@ -57,9 +52,3 @@ with tab2:
                 st.success("Successfully signed up! Please check your email for verification.")
         else:
             st.error("Please enter both email and password")
-
-# def main():
-#     st.title("Welcome to the TikTok Content Creator Portal!")
-#     st.success(f"You are logged in as {st.session_state['user'].email}")
-#     if st.button("Sign Out"):
-#             sign_out()
