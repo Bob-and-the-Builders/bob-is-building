@@ -103,38 +103,63 @@ def _vts_lookup(vts_map: Dict[str, float], user_id) -> float:
         return 50.0
 
 
-def comment_quality_with_details(comments: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
+def comment_quality_with_details(
+    comments: List[Dict], vts_map: Dict[str, float], active_viewers: int
+) -> Tuple[float, Dict]:
+    """Content-agnostic quality: who comments, not what they say.
+
+    - unique_commenters_rate: unique commenters / active viewers (clamped ≤ 1)
+    - avg_commenter_vts: average VTS of commenters
+    Score blends both with weights 0.6 and 0.4 respectively.
+    """
     if not comments:
-        return 50.0, {"avg_vts": None, "moderation_avg": {"toxicity": 0.0, "insult": 0.0, "spam_prob": 0.0}}
-    scores = []
-    tox_acc = 0.0; ins_acc = 0.0; spam_acc = 0.0; n=0
-    for c in comments:
-        m = (c.get("moderation") or {})
-        tox = float(m.get("toxicity", 0.0) or 0.0)
-        ins = float(m.get("insult", 0.0) or 0.0)
-        spam = float(m.get("spam_prob", 0.0) or 0.0)
-        vts = _vts_lookup(vts_map, c.get("user_id")) / 100.0
-        base = 100.0 * (1.0 - 0.7 * tox - 0.5 * ins - 0.8 * spam)
-        scores.append(max(0.0, min(100.0, base)) * (0.5 + 0.5 * vts))
-        tox_acc += tox; ins_acc += ins; spam_acc += spam; n+=1
-    score = float(sum(scores) / max(1, len(scores)))
-    details = {
-        "avg_vts": float(sum(_vts_lookup(vts_map, c.get("user_id")) for c in comments)/len(comments)),
-        "moderation_avg": {
-            "toxicity": tox_acc/max(1,n),
-            "insult": ins_acc/max(1,n),
-            "spam_prob": spam_acc/max(1,n),
-        }
-    }
-    return score, details
+        return 50.0, {"unique_commenters_rate": 0.0, "avg_commenter_vts": None}
+    uniq = len({c.get("user_id") for c in comments})
+    ucr = min(1.0, uniq / max(1, active_viewers))
+    vts_mean = sum(_vts_lookup(vts_map, c.get("user_id")) for c in comments) / (100.0 * len(comments))
+    score = max(0.0, min(100.0, 100.0 * (0.6 * ucr + 0.4 * vts_mean)))
+    return score, {"unique_commenters_rate": ucr, "avg_commenter_vts": vts_mean * 100.0}
 
 def comment_quality(comments: List[Dict], vts_map: Dict[str, float]) -> float:
-    return comment_quality_with_details(comments, vts_map)[0]
+    # Fallback wrapper when active_viewers is unknown: approximate with unique commenters
+    approx_active = max(1, len({c.get("user_id") for c in comments}))
+    return comment_quality_with_details(comments, vts_map, approx_active)[0]
 
 def like_integrity_with_details(likes: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
+    """Blend VTS, timing naturalness, and device/IP clustering into a 0–100 score."""
     if not likes:
-        return 50.0, {"avg_vts": None, "users_per_device": None, "users_per_ip": None, "penalty_device": 0.0, "penalty_ip": 0.0}
+        return 50.0, {
+            "avg_vts": None,
+            "nat_cv": None,
+            "users_per_device": None,
+            "users_per_ip": None,
+            "penalty_device": 0.0,
+            "penalty_ip": 0.0,
+            "penalty_naturalness": 0.0,
+            "penalty_total": 0.0,
+        }
     base = sum(_vts_lookup(vts_map, l.get("user_id")) for l in likes) / len(likes)
+
+    # Timing naturalness: coefficient of variation of inter-arrival intervals (seconds)
+    ts = sorted([_parse_ts(l.get("ts")) for l in likes if _parse_ts(l.get("ts")) is not None])
+    diffs = []
+    for i in range(1, len(ts)):
+        d = (ts[i] - ts[i - 1]).total_seconds()
+        if d > 0:
+            diffs.append(d)
+    nat_cv = None
+    penalty_nat = 0.0
+    if len(diffs) >= 2:
+        mean = sum(diffs) / len(diffs)
+        var = sum((x - mean) ** 2 for x in diffs) / (len(diffs) - 1)
+        std = math.sqrt(max(0.0, var))
+        nat_cv = std / mean if mean > 0 else None
+        # Penalize extreme regularity (cv too low) or extreme burstiness (cv too high)
+        if nat_cv is not None:
+            if nat_cv < 0.5:
+                penalty_nat = min(25.0, 40.0 * (0.5 - nat_cv))
+            elif nat_cv > 1.5:
+                penalty_nat = min(25.0, 20.0 * (nat_cv - 1.5))
 
     # Device/IP clustering penalty: many unique users per device/IP is suspicious
     devices = {}
@@ -160,15 +185,17 @@ def like_integrity_with_details(likes: List[Dict], vts_map: Dict[str, float]) ->
         ip_excess = max(0.0, users_per_ip - 1.5)
         penalty_ip = min(25.0, 10.0 * ip_excess)
 
-    penalty = penalty_device + penalty_ip
-    score = float(max(0.0, min(100.0, base - penalty)))
+    penalty_total = penalty_device + penalty_ip + penalty_nat
+    score = float(max(0.0, min(100.0, base - penalty_total)))
     details = {
         "avg_vts": base,
+        "nat_cv": nat_cv,
         "users_per_device": users_per_device or None,
         "users_per_ip": users_per_ip or None,
         "penalty_device": penalty_device,
         "penalty_ip": penalty_ip,
-        "penalty_total": penalty,
+        "penalty_naturalness": penalty_nat,
+        "penalty_total": penalty_total,
     }
     return score, details
 
@@ -212,7 +239,22 @@ def authentic_engagement_with_details(features: Dict[str, float]) -> Tuple[float
 
     s_like = min(100.0, 100.0 * lpv / max(1e-6, like_target))
     s_comm = min(100.0, 100.0 * cpv / max(1e-6, comment_target))
-    score = float(max(0.0, min(100.0, 0.6 * s_like + 0.4 * s_comm)))
+    s_base = float(max(0.0, min(100.0, 0.6 * s_like + 0.4 * s_comm)))
+
+    # Optional audience factor (content-agnostic): normalize active_viewers to 0..100
+    av = features.get("active_viewers", 0)
+    try:
+        av = int(av)
+    except Exception:
+        av = 0
+    # log-normalize to 0..1 with ~100 viewers -> 1.0
+    if av <= 0:
+        aud_norm = 0.0
+    else:
+        aud_norm = min(1.0, math.log1p(av) / math.log(1 + 100))
+    s_aud = 100.0 * aud_norm
+
+    score = float(max(0.0, min(100.0, 0.8 * s_base + 0.2 * s_aud)))
     details = {
         "lpv": lpv,
         "cpv": cpv,
@@ -222,6 +264,9 @@ def authentic_engagement_with_details(features: Dict[str, float]) -> Tuple[float
         "recency_scale": recency_scale,
         "s_like": s_like,
         "s_comm": s_comm,
+        "s_base": s_base,
+        "active_viewers": av,
+        "audience_component": s_aud,
     }
     return score, details
 

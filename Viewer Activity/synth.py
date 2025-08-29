@@ -117,7 +117,7 @@ def main(video_id: int = 10, minutes: int = 5) -> None:
 
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=minutes)
-        payload = analyze_window(video_id, start, end, use_semantics=True)
+        payload = analyze_window(video_id, start, end)
         print(f"EIS: {payload['eis']:.1f}")
     except Exception as e:
         print(f"Seed complete, but EIS computation failed: {e}")
