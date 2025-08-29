@@ -16,5 +16,6 @@ class SupabaseDB:
     def insert(self, table: str, row: dict):
         """Insert a row into a table."""
         return self.client.table(table).insert(row).execute().data
+    
     def get_client(self) -> Client:
         return self.client
