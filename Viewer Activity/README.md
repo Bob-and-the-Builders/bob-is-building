@@ -20,7 +20,11 @@ Notes
 - Schema standardized to diagram: `users(id)`, `videos(id, creator_id, title, duration_s)`, `event(event_id, video_id, user_id, event_type, ts, device_id, ip_hash)`.
 - No aggregates or moderation tables are written; EIS is computed on-demand.
 - Writes require a service-role key due to RLS; anon key is often read-only.
-- Analyzer reads `videos.duration_s` when available and adapts engagement targets accordingly.
+- EIS uses only schema-derived engagement rates (no external video metadata). Duration is not required.
+- Uses schema fields from `videos`:
+  - `duration_s` adjusts expected engagement density (shorter videos → higher targets).
+  - `created_at` contributes a recency adjustment (very new videos get target leniency; >24h slightly stricter).
+  - Also fetches creator’s `creator_trust_score` for a mild multiplier (±5%).
 - Bot/abuse checks integrated:
   - `users.likely_bot` and `users.kyc_level` reduce viewer trust (VTS) which flows into like/report integrity and comment quality.
   - Device/IP clustering on likes lowers like integrity when many distinct users share the same `device_id` or `ip_hash` within the window.

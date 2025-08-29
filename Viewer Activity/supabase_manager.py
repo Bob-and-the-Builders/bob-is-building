@@ -1,9 +1,16 @@
 # supabase_manager.py (patched)
-from supabase_conn import create_client
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    from supabase import create_client as _create_client  # type: ignore
+except Exception as _e:
+    _create_client = None  # type: ignore
 
 def _make_client():
     url = os.getenv("SUPABASE_URL")
@@ -17,7 +24,9 @@ def _make_client():
     )
     if not url or not key:
         raise RuntimeError("Missing Supabase credentials: set SUPABASE_URL and a service/anon key env var.")
-    return create_client(url, key)
+    if _create_client is None:
+        raise RuntimeError("supabase package not installed. Please `pip install supabase`. ")
+    return _create_client(url, key)
 
 client = _make_client()
 

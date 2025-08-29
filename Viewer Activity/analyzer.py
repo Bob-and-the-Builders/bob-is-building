@@ -2,10 +2,10 @@
 from supabase_manager import client, fetch_events, upsert_aggregate
 from scoring import (
     get_vts_map,
-    comment_quality,
-    like_integrity,
-    report_cleanliness,
-    authentic_engagement,
+    comment_quality_with_details,
+    like_integrity_with_details,
+    report_cleanliness_with_details,
+    authentic_engagement_with_details,
     eis_score,
 )
 from datetime import datetime, timedelta, timezone
@@ -35,8 +35,6 @@ def analyze_window(video_id, start, end, use_semantics=False):
     total_views = len(by["view"]); likes=len(by["like"]); comments=len(by["comment"]) 
     # Diagram schema has no per-view watch metadata; set watch ratio neutral (0.0)
     avg_watch_ratio = 0.0
-    # Optional duration in schema
-    duration_s = vid.get("duration_s") or vid.get("duration_seconds") or None
     # Device/IP concentration among likers (exposed for transparency)
     like_devices = {}
     like_ips = {}
@@ -48,6 +46,17 @@ def analyze_window(video_id, start, end, use_semantics=False):
     likes_per_device = (sum(len(s) for s in like_devices.values()) / max(1, len(like_devices))) if like_devices else None
     likes_per_ip = (sum(len(s) for s in like_ips.values()) / max(1, len(like_ips))) if like_ips else None
 
+    # Video metadata from schema
+    created_at = vid.get("created_at")
+    try:
+        created_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")) if created_at else None
+    except Exception:
+        created_dt = None
+    age_hours = None
+    if created_dt is not None:
+        age_hours = max(0.0, (end - created_dt).total_seconds() / 3600.0)
+    duration_s = vid.get("duration_s")
+
     feats = {
         "active_viewers": active_viewers,
         "total_views": total_views,
@@ -55,7 +64,9 @@ def analyze_window(video_id, start, end, use_semantics=False):
         "comments_per_view": comments/max(1,total_views),
         "unique_commenters_rate": len({x["user_id"] for x in by["comment"]})/max(1,active_viewers),
         "avg_watch_ratio": float(avg_watch_ratio),
-        "video_duration_s": float(duration_s) if duration_s is not None else None,
+        "video_duration_s": float(duration_s) if isinstance(duration_s, (int, float)) else None,
+        "video_created_at": created_at,
+        "video_age_hours": float(age_hours) if age_hours is not None else None,
         "likes_per_device": float(likes_per_device) if likes_per_device is not None else None,
         "likes_per_ip": float(likes_per_ip) if likes_per_ip is not None else None,
     }
@@ -68,12 +79,27 @@ def analyze_window(video_id, start, end, use_semantics=False):
         c["moderation"] = {"toxicity": 0.0, "insult": 0.0, "spam_prob": 0.0}
 
     # component scores
-    cq = comment_quality(by["comment"], vts_map)
-    li = like_integrity(by["like"], vts_map)
-    rc = report_cleanliness(by["report"], vts_map)
-    ae = authentic_engagement(feats)
+    ae, ae_det = authentic_engagement_with_details(feats)
+    cq, cq_det = comment_quality_with_details(by["comment"], vts_map)
+    li, li_det = like_integrity_with_details(by["like"], vts_map)
+    rc, rc_det = report_cleanliness_with_details(by["report"], vts_map)
 
     eis = eis_score(ae, cq, li, rc)
+
+    # Optional: small creator trust modulation if available
+    try:
+        creator_row = (
+            client.table("users").select("creator_trust_score").eq("id", creator_id).single().execute().data
+            if creator_id is not None
+            else None
+        )
+        if creator_row and creator_row.get("creator_trust_score") is not None:
+            cts = max(0.0, min(100.0, float(creator_row.get("creator_trust_score") or 0.0)))
+            factor = 0.95 + 0.10 * (cts / 100.0)  # 0.95..1.05
+            eis = float(max(0.0, min(100.0, eis * factor)))
+            feats["creator_trust_score"] = cts
+    except Exception:
+        pass
 
     # optional semantics-lite (tiny nudge, stays in scope)
     if use_semantics:
@@ -82,13 +108,22 @@ def analyze_window(video_id, start, end, use_semantics=False):
         bonus = semantics_bonus(title, [])
         eis = min(100.0, eis + bonus)
 
+    breakdown = {
+        "authentic_engagement": ae_det,
+        "comment_quality": cq_det,
+        "like_integrity": li_det,
+        "report_cleanliness": rc_det,
+        "weights": {"ae": 0.4, "cq": 0.25, "li": 0.2, "rc": 0.15},
+    }
+
     payload = {
         "features": feats,
         "comment_quality": cq,
         "like_integrity": li,
         "report_credibility": rc,
         "authentic_engagement": ae,
-        "eis": eis
+        "eis": eis,
+        "breakdown": breakdown,
     }
     upsert_aggregate(video_id, start, end, payload)
     return payload

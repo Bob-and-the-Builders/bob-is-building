@@ -1,6 +1,6 @@
 from supabase_manager import client
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import math
 
 # --- Helpers ---
@@ -93,10 +93,11 @@ def spam_prob(text: str) -> float:
     return float(min(0.9, 0.25 * hits))
 
 # --- Component scores (0..100) ---
-def comment_quality(comments: List[Dict], vts_map: Dict[str, float]) -> float:
+def comment_quality_with_details(comments: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not comments:
-        return 50.0
+        return 50.0, {"avg_vts": None, "moderation_avg": {"toxicity": 0.0, "insult": 0.0, "spam_prob": 0.0}}
     scores = []
+    tox_acc = 0.0; ins_acc = 0.0; spam_acc = 0.0; n=0
     for c in comments:
         m = (c.get("moderation") or {})
         tox = float(m.get("toxicity", 0.0) or 0.0)
@@ -105,11 +106,24 @@ def comment_quality(comments: List[Dict], vts_map: Dict[str, float]) -> float:
         vts = float(vts_map.get(c.get("user_id"), 50.0)) / 100.0
         base = 100.0 * (1.0 - 0.7 * tox - 0.5 * ins - 0.8 * spam)
         scores.append(max(0.0, min(100.0, base)) * (0.5 + 0.5 * vts))
-    return float(sum(scores) / max(1, len(scores)))
+        tox_acc += tox; ins_acc += ins; spam_acc += spam; n+=1
+    score = float(sum(scores) / max(1, len(scores)))
+    details = {
+        "avg_vts": float(sum(vts_map.get(c.get("user_id"), 50.0) for c in comments)/len(comments)),
+        "moderation_avg": {
+            "toxicity": tox_acc/max(1,n),
+            "insult": ins_acc/max(1,n),
+            "spam_prob": spam_acc/max(1,n),
+        }
+    }
+    return score, details
 
-def like_integrity(likes: List[Dict], vts_map: Dict[str, float]) -> float:
+def comment_quality(comments: List[Dict], vts_map: Dict[str, float]) -> float:
+    return comment_quality_with_details(comments, vts_map)[0]
+
+def like_integrity_with_details(likes: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not likes:
-        return 50.0
+        return 50.0, {"avg_vts": None, "users_per_device": None, "users_per_ip": None, "penalty_device": 0.0, "penalty_ip": 0.0}
     base = sum(vts_map.get(l.get("user_id"), 50.0) for l in likes) / len(likes)
 
     # Device/IP clustering penalty: many unique users per device/IP is suspicious
@@ -124,57 +138,85 @@ def like_integrity(likes: List[Dict], vts_map: Dict[str, float]) -> float:
         if ip:
             ips.setdefault(ip, set()).add(uid)
 
-    penalty = 0.0
+    users_per_device = (sum(len(s) for s in devices.values()) / max(1, len(devices))) if devices else 0.0
+    users_per_ip = (sum(len(s) for s in ips.values()) / max(1, len(ips))) if ips else 0.0
+
+    penalty_device = 0.0
+    penalty_ip = 0.0
     if devices:
-        users_per_device = sum(len(s) for s in devices.values()) / max(1, len(devices))
-        # allow up to 1.2 users/device without penalty; scale after
         dev_excess = max(0.0, users_per_device - 1.2)
-        penalty += min(25.0, 12.0 * dev_excess)
+        penalty_device = min(25.0, 12.0 * dev_excess)
     if ips:
-        users_per_ip = sum(len(s) for s in ips.values()) / max(1, len(ips))
         ip_excess = max(0.0, users_per_ip - 1.5)
-        penalty += min(25.0, 10.0 * ip_excess)
+        penalty_ip = min(25.0, 10.0 * ip_excess)
 
-    return float(max(0.0, min(100.0, base - penalty)))
+    penalty = penalty_device + penalty_ip
+    score = float(max(0.0, min(100.0, base - penalty)))
+    details = {
+        "avg_vts": base,
+        "users_per_device": users_per_device or None,
+        "users_per_ip": users_per_ip or None,
+        "penalty_device": penalty_device,
+        "penalty_ip": penalty_ip,
+        "penalty_total": penalty,
+    }
+    return score, details
 
-def report_cleanliness(reports: List[Dict], vts_map: Dict[str, float]) -> float:
+def like_integrity(likes: List[Dict], vts_map: Dict[str, float]) -> float:
+    return like_integrity_with_details(likes, vts_map)[0]
+
+def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not reports:
-        return 90.0
-    # High-VTS reports indicate real issues; reduce cleanliness accordingly
+        return 90.0, {"weighted_vts": 0.0, "penalty": 0.0}
     weight = sum((vts_map.get(r.get("user_id"), 50.0) / 100.0) for r in reports)
     penalty = 25.0 * weight
-    return float(max(0.0, 100.0 - penalty))
+    score = float(max(0.0, 100.0 - penalty))
+    return score, {"weighted_vts": weight, "penalty": penalty}
 
-def authentic_engagement(features: Dict[str, float]) -> float:
-    # Like/comment rates
+def report_cleanliness(reports: List[Dict], vts_map: Dict[str, float]) -> float:
+    return report_cleanliness_with_details(reports, vts_map)[0]
+
+def authentic_engagement_with_details(features: Dict[str, float]) -> Tuple[float, Dict]:
+    # Schema-driven scoring with optional duration and recency adjustments
     lpv = float(features.get("likes_per_view", 0.0) or 0.0)
     cpv = float(features.get("comments_per_view", 0.0) or 0.0)
 
-    # Adaptive targets based on optional metadata
+    like_target = 0.10   # 10% likes per view considered strong
+    comment_target = 0.02  # 2% comments per view considered strong
+
+    # Adjust targets by video duration if provided
     duration = features.get("video_duration_s")
-
-    # Baselines
-    like_target = 0.10
-    comment_target = 0.02
-
-    # Duration scaling: shorter videos tend to concentrate engagement
+    duration_scale = 1.0
     if isinstance(duration, (int, float)) and duration and duration > 0:
-        dur_scale = max(0.7, min(1.3, 15.0 / float(duration)))
-        like_target *= dur_scale
-        comment_target *= dur_scale
+        duration_scale = max(0.7, min(1.3, 15.0 / float(duration)))
+        like_target *= duration_scale
+        comment_target *= duration_scale
 
+    # Adjust by recency (hours since created_at): newer videos get leniency; older, slightly stricter
+    age_h = features.get("video_age_hours")
+    recency_scale = 1.0
+    if isinstance(age_h, (int, float)) and age_h >= 0:
+        recency_scale = max(0.8, min(1.2, 0.8 + 0.4 * min(1.0, float(age_h) / 24.0)))
+        like_target *= recency_scale
+        comment_target *= recency_scale
 
-    # Normalize to 0..100 with adaptive targets
-    s_like = 100.0 * lpv / max(1e-6, like_target)
-    s_comm = 100.0 * cpv / max(1e-6, comment_target)
+    s_like = min(100.0, 100.0 * lpv / max(1e-6, like_target))
+    s_comm = min(100.0, 100.0 * cpv / max(1e-6, comment_target))
+    score = float(max(0.0, min(100.0, 0.6 * s_like + 0.4 * s_comm)))
+    details = {
+        "lpv": lpv,
+        "cpv": cpv,
+        "like_target": like_target,
+        "comment_target": comment_target,
+        "duration_scale": duration_scale,
+        "recency_scale": recency_scale,
+        "s_like": s_like,
+        "s_comm": s_comm,
+    }
+    return score, details
 
-    # Cap scores
-    s_like = min(100.0, s_like)
-    s_comm = min(100.0, s_comm)
-
-    base = 0.6 * s_like + 0.4 * s_comm
-
-    return float(max(0.0, min(100.0, base)))
+def authentic_engagement(features: Dict[str, float]) -> float:
+    return authentic_engagement_with_details(features)[0]
 
 def eis_score(ae: float, cq: float, li: float, rc: float) -> float:
     # Weighted blend

@@ -31,6 +31,7 @@ def seed_users(n_viewers: int = 80) -> List[str]:
 
 
 def seed_video(video_id: int = 10, creator_id: int = 1, duration_s: int = 15) -> None:
+    now = datetime.now(timezone.utc)
     client.table("videos").upsert(
         [
             {
@@ -38,6 +39,7 @@ def seed_video(video_id: int = 10, creator_id: int = 1, duration_s: int = 15) ->
                 "creator_id": creator_id,
                 "title": "Latte Art Tips",
                 "duration_s": duration_s,
+                "created_at": (now - timedelta(hours=random.randint(0, 48))).isoformat(),
             }
         ]
     ).execute()
