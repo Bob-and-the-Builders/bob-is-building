@@ -68,5 +68,23 @@ def fetch_events(video_id: str, start: datetime, end: datetime):
     return data
 
 def upsert_aggregate(video_id: str, ws, we, payload: Dict):
-    # Diagram schema has no aggregates or EIS columns; this is a no-op
-    return
+    # Persist transparent aggregates for auditability and update current EIS on videos
+    client.table("video_aggregates").insert(
+        {
+            "video_id": int(video_id),
+            "window_start": ws.isoformat(),
+            "window_end": we.isoformat(),
+            "features": payload.get("features", {}),
+            "comment_quality": payload.get("comment_quality"),
+            "like_integrity": payload.get("like_integrity"),
+            "report_credibility": payload.get("report_credibility"),
+            "authentic_engagement": payload.get("authentic_engagement"),
+            "eis": payload.get("eis"),
+        }
+    ).execute()
+    client.table("videos").update(
+        {
+            "eis_current": payload.get("eis"),
+            "eis_updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).eq("id", int(video_id)).execute()

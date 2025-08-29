@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
 
-def analyze_window(video_id, start, end, use_semantics=False):
+def analyze_window(video_id, start, end):
     # fetch creator_id to exclude creator’s self-engagement
     # Load video by videos.id (diagram schema)
     # Cast numeric IDs provided as strings for equality filter
@@ -80,7 +80,7 @@ def analyze_window(video_id, start, end, use_semantics=False):
 
     # component scores
     ae, ae_det = authentic_engagement_with_details(feats)
-    cq, cq_det = comment_quality_with_details(by["comment"], vts_map)
+    cq, cq_det = comment_quality_with_details(by["comment"], vts_map, active_viewers)
     li, li_det = like_integrity_with_details(by["like"], vts_map)
     rc, rc_det = report_cleanliness_with_details(by["report"], vts_map)
 
@@ -101,12 +101,7 @@ def analyze_window(video_id, start, end, use_semantics=False):
     except Exception:
         pass
 
-    # optional semantics-lite (tiny nudge, stays in scope)
-    if use_semantics:
-        from semantics_lite import semantics_bonus
-        title = vid.get("title") or ""
-        bonus = semantics_bonus(title, [])
-        eis = min(100.0, eis + bonus)
+    # No content semantics used; score is strictly schema-based
 
     breakdown = {
         "authentic_engagement": ae_det,
