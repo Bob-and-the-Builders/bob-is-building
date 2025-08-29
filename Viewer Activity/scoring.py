@@ -93,6 +93,16 @@ def spam_prob(text: str) -> float:
     return float(min(0.9, 0.25 * hits))
 
 # --- Component scores (0..100) ---
+def _vts_lookup(vts_map: Dict[str, float], user_id) -> float:
+    """Lookup helper that normalizes event user_id (int/str) to vts_map keys (str)."""
+    if user_id is None:
+        return 50.0
+    try:
+        return float(vts_map.get(str(user_id), 50.0))
+    except Exception:
+        return 50.0
+
+
 def comment_quality_with_details(comments: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not comments:
         return 50.0, {"avg_vts": None, "moderation_avg": {"toxicity": 0.0, "insult": 0.0, "spam_prob": 0.0}}
@@ -103,13 +113,13 @@ def comment_quality_with_details(comments: List[Dict], vts_map: Dict[str, float]
         tox = float(m.get("toxicity", 0.0) or 0.0)
         ins = float(m.get("insult", 0.0) or 0.0)
         spam = float(m.get("spam_prob", 0.0) or 0.0)
-        vts = float(vts_map.get(c.get("user_id"), 50.0)) / 100.0
+        vts = _vts_lookup(vts_map, c.get("user_id")) / 100.0
         base = 100.0 * (1.0 - 0.7 * tox - 0.5 * ins - 0.8 * spam)
         scores.append(max(0.0, min(100.0, base)) * (0.5 + 0.5 * vts))
         tox_acc += tox; ins_acc += ins; spam_acc += spam; n+=1
     score = float(sum(scores) / max(1, len(scores)))
     details = {
-        "avg_vts": float(sum(vts_map.get(c.get("user_id"), 50.0) for c in comments)/len(comments)),
+        "avg_vts": float(sum(_vts_lookup(vts_map, c.get("user_id")) for c in comments)/len(comments)),
         "moderation_avg": {
             "toxicity": tox_acc/max(1,n),
             "insult": ins_acc/max(1,n),
@@ -124,7 +134,7 @@ def comment_quality(comments: List[Dict], vts_map: Dict[str, float]) -> float:
 def like_integrity_with_details(likes: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not likes:
         return 50.0, {"avg_vts": None, "users_per_device": None, "users_per_ip": None, "penalty_device": 0.0, "penalty_ip": 0.0}
-    base = sum(vts_map.get(l.get("user_id"), 50.0) for l in likes) / len(likes)
+    base = sum(_vts_lookup(vts_map, l.get("user_id")) for l in likes) / len(likes)
 
     # Device/IP clustering penalty: many unique users per device/IP is suspicious
     devices = {}
@@ -168,7 +178,7 @@ def like_integrity(likes: List[Dict], vts_map: Dict[str, float]) -> float:
 def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
     if not reports:
         return 90.0, {"weighted_vts": 0.0, "penalty": 0.0}
-    weight = sum((vts_map.get(r.get("user_id"), 50.0) / 100.0) for r in reports)
+    weight = sum((_vts_lookup(vts_map, r.get("user_id")) / 100.0) for r in reports)
     penalty = 25.0 * weight
     score = float(max(0.0, 100.0 - penalty))
     return score, {"weighted_vts": weight, "penalty": penalty}

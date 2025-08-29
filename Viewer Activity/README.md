@@ -11,10 +11,11 @@ Seed + Quick Test
 - Seed demo data and compute EIS for `videos.id=10` over the last 5 minutes:
   - `python Viewer Activity/synth.py`
   - This populates `users`, `videos`, and `event`, then runs the analyzer.
+  - Verify schema connectivity: `python Viewer Activity/schema_probe.py`
 
 Run UI
 - `streamlit run Viewer Activity/app.py`
-- Enter a `Video ID` (default `v1`) and a window size, then press the button.
+- Enter a `Video ID` (default `10`) and a window size, then press the button.
 
 Notes
 - Schema standardized to diagram: `users(id)`, `videos(id, creator_id, title, duration_s)`, `event(event_id, video_id, user_id, event_type, ts, device_id, ip_hash)`.
