@@ -1,5 +1,7 @@
-from supabase import create_client, Client
+from supabase_conn import create_client, Client
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 class SupabaseDB:
     def __init__(self):

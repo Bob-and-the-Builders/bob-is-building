@@ -1,5 +1,5 @@
 # supabase_manager.py (patched)
-from supabase import create_client
+from supabase_conn import create_client
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
