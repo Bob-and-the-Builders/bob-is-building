@@ -14,17 +14,49 @@ load_dotenv()
 st.set_page_config(page_title="Upload Video", page_icon="📹")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Prefer ANON key; keep compatibility with existing env
+SUPABASE_KEY = os.getenv("SUPABASE_SECRET") or os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 st.title("📹 Upload a Video")
+
+# Use the logged-in user's token so RLS applies correctly
+access_token = st.session_state.get("access_token")
+if access_token:
+    try:
+        supabase.postgrest.auth(access_token)
+    except Exception:
+        pass
 
 # Auth gate
 user = st.session_state.get("user")
 if not user:
     st.info("Please sign in on the main page to upload a video.")
     st.stop()
+else:
+    st.info("You are logged in as: {}".format(user.email))
+
+def get_creator_id_from_email(email: str) -> int | None:
+    """SELECT user_id FROM user_info WHERE email = <email>"""
+    if not email:
+        return None
+    try:
+        res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
+        if res and getattr(res, "data", None):
+            return res.data.get("user_id")
+    except Exception as e:
+        st.warning(f"Could not resolve creator_id from user_info: {e}")
+    return None
+
+# Resolve creator_id via user_info
+creator_id_lookup = get_creator_id_from_email(getattr(user, "email", None))
+if creator_id_lookup is None:
+    # Fallback to auth user id if no user_info row is found
+    creator_id_lookup = getattr(user, "id", None)
+    if creator_id_lookup is None:
+        st.error("Unable to determine creator_id. Please ensure your user has a user_info row.")
+        st.stop()
 
 uploaded_file = st.file_uploader(
     "Choose a video file",
@@ -45,9 +77,9 @@ if uploaded_file is not None:
     try:
         status.info("Extracting metadata…")
 
-        # Default metadata
+        # Default metadata (for optional future use)
         metadata = {
-            "creator_id": getattr(user, "id", None) or getattr(user, "user", {}).get("id") if hasattr(user, "user") else None,
+            "creator_id": creator_id_lookup,
             "filename": uploaded_file.name,
             "filesize": uploaded_file.size,
             "mime_type": uploaded_file.type,
@@ -106,13 +138,46 @@ if uploaded_file is not None:
             # ffprobe not available; skip codec
             pass
 
-        # Insert metadata into Supabase
-        status.info("Uploading your video now! Please sit tight…")
+        # Map to your videos schema and insert
+        # Schema: id (auto), created_at (timestamptz), creator_id (int8), title (text), duration_s (int)
+        created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        title = os.path.splitext(uploaded_file.name)[0]
+        duration_s = int(round(metadata["duration_seconds"])) if metadata["duration_seconds"] else None
+
+        video_row = {
+            "created_at": created_at,
+            "creator_id": creator_id_lookup,
+            "title": title,
+            "duration_s": duration_s,
+        }
+
+        status.info("Saving to your TikTok videos…")
         try:
-            # response = supabase.table("video_metadata").insert(metadata).execute()
-            status.success("Video uploaded! Yay :D")
-            with st.expander("Saved metadata", expanded=True):
-                st.json(metadata)
+            # Insert first (no select chaining in supabase-py)
+            insert_resp = supabase.table("videos").insert(video_row).execute()
+
+            # Try to show the inserted row; fall back to the payload if needed
+            saved_row = insert_resp.data[0] if getattr(insert_resp, "data", None) else None
+
+            # Optionally refetch with specific columns if we have an id
+            row_to_show = saved_row or video_row
+            if saved_row and "id" in saved_row:
+                try:
+                    detail = (
+                        supabase.table("videos")
+                        .select("id, created_at, creator_id, title, duration_s")
+                        .eq("id", saved_row["id"])
+                        .single()
+                        .execute()
+                    )
+                    if getattr(detail, "data", None):
+                        row_to_show = detail.data
+                except Exception:
+                    pass
+
+            status.success("Video saved to database!")
+            with st.expander("Saved row", expanded=True):
+                st.json(row_to_show)
         except Exception as e:
             status.error(f"Failed to upload video to TikTok: {e}")
     finally:

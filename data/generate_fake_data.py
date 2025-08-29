@@ -377,12 +377,12 @@ def force_creators_by_email(users: List[User], infos: List[UserInfo], emails: Li
             if u.creator_trust_score is None:
                 u.creator_trust_score = random.randint(55, 100)
             if u.current_balance == 0:
-                u.current_balance = random.randint(0, 500_000)  # cents
+                u.current_balance = random.randint(0, 900_000)  # cents
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate TechJam fake data with valid foreign keys")
-    parser.add_argument("--users", type=int, default=60, help="Total users to generate")
+    parser.add_argument("--users", type=int, default=750, help="Total users to generate")
     parser.add_argument("--creator-ratio", type=float, default=0.35, help="Fraction of users that are creators")
     parser.add_argument("--min-videos", type=int, default=2, help="Min videos per creator")
     parser.add_argument("--max-videos", type=int, default=6, help="Max videos per creator")
