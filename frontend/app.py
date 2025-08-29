@@ -14,21 +14,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 if 'user' not in st.session_state:
     st.session_state['user'] = None
 
-def sign_up(email: str, password: str):
-    try:
-        user = supabase.auth.sign_up({"email": email, "password": password})
-        return user
-    except Exception as e:
-        st.error(f"Error signing up: {e}")
-
-def sign_in(email: str, password: str):
-    try:
-        user = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        return user
-    except Exception as e:
-        st.error(f"Error signing in: {e}")
-        return None
-
 def sign_out():
     try:
         supabase.auth.sign_out()
@@ -46,59 +31,35 @@ def get_current_user():
         return user
     except Exception as e:
         return None
-    
-def auth():
-    st.title("TikTok Content Creator Portal")
-    # Show login/signup options
-    tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
-    
-    with tab1:
-        st.subheader("Sign In")
-        email = st.text_input("Email", key="signin_email")
-        password = st.text_input("Password", type="password", key="signin_password")
-        
-        if st.button("Sign In", key="signin_button"):
-            if email and password:
-                user = sign_in(email, password)
-                if user and user.user:
-                    st.session_state['user'] = user.user
-                    st.success("Successfully signed in!")
-                    st.rerun()
-            else:
-                st.error("Please enter both email and password")
-    
-    with tab2:
-        st.subheader("Sign Up")
-        email = st.text_input("Email", key="signup_email")
-        password = st.text_input("Password", type="password", key="signup_password")
-        
-        if st.button("Sign Up", key="signup_button"):
-            if email and password:
-                user = sign_up(email, password)
-                if user:
-                    st.success("Successfully signed up! Please check your email for verification.")
-            else:
-                st.error("Please enter both email and password")
 
-def main():
-    st.title("Welcome to the TikTok Content Creator Portal!")
-    st.success(f"You are logged in as {st.session_state['user'].email}")
-    if st.button("Sign Out"):
-            sign_out()
-        
+# Define the pages
+login_page = st.Page("pages/auth.py", title="Log in", icon=":material/login:")
+signout_page = st.Page(sign_out, title="Sign out", icon=":material/logout:")
 
-if __name__ == "__main__":
-    # Check if user is already logged in (ensured above as well)
-    if 'user' not in st.session_state:
-        st.session_state['user'] = None
-    
-    # Get current user
-    # current_user = get_current_user()
-    # if current_user and current_user.user:
-    #     st.session_state['user'] = current_user.user
-    
-    # If user is logged in, show logout option
-    if st.session_state['user']:
-        main()
-    else:
-        auth()
+dashboard = st.Page("pages/creator_dashboard.py", title="Dashboard", icon=":material/dashboard:", default=True)
+upload_video = st.Page("pages/upload_video.py", title="Upload Video", icon=":material/upload:")
+payout = st.Page("pages/video_payouts.py", title="Payout", icon=":material/money:")
+email_verified = st.Page("pages/email_verified.py", title="Email Verified", icon=":material/email:")
+
+# Check if user is already logged in (ensured above as well)
+if 'user' not in st.session_state:
+    st.session_state['user'] = None
+
+# Get current user
+current_user = get_current_user()
+if current_user and current_user.user:
+    st.session_state['user'] = current_user.user
+
+# Set up navigation
+if st.session_state['user']:
+    pg = st.navigation(
+        {
+            "Account": [signout_page],
+            "Content Creator Portal": [dashboard, upload_video, payout]
+        }
+    )
+else:
+    pg = st.navigation([login_page], position="hidden")
+
+# Run the selected page
+pg.run()
