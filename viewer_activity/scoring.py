@@ -1,4 +1,4 @@
-from supabase_manager import client
+from .supabase_manager import client
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 import math

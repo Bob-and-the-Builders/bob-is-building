@@ -1,20 +1,40 @@
 Revenue Split Module
 ====================
 
-This package implements a margin-safe shorts revenue split with four refinements:
+This package implements a margin-safe revenue split for short-form videos that
+is directly driven by Viewer Activity (VA) metrics. There is no admin UI; all
+results are written transparently to database tables and can be viewed “as is”.
 
-- Quality-Indexed Pool (±2% within margin guardrail)
-- Integrity Streak Bonus (creator ±3% by 7-day avg EIS)
-- Early-Velocity Kicker (+5% VU if early natural & diverse)
-- Cluster Penalty Escalator (down-weights VU under device/IP clustering)
+How Allocation Works
+--------------------
+- Pool sizing: A portion of net revenue forms the creator pool, capped to meet a
+  margin target.
+- Video weighting: For each eligible video in the window, we compute a utility
+  score VU = EngUnits × (EIS/100)^γ × integrity_mod, where:
+  - EngUnits is a simple event volume proxy from `event` rows
+    (views + 2×likes + 5×comments − 10×reports, clamped ≥ 0).
+  - EIS is produced by `viewer_activity` and averaged over the window.
+  - integrity_mod is a small multiplier (0.85..1.0) derived from
+    `viewer_activity` component scores (`like_integrity`, `report_credibility`).
+- Creator streak bonus: A modest ±3% multiplier at the creator level based on
+  7‑day average `videos.eis_current`, then re-normalized to preserve the pool.
 
-Files
------
-- `revenue_split/revenue_split.py`: server-side allocation logic (uses service-role key).
-- `revenue_split/admin_revenue.py`: Streamlit admin to simulate a window and view allocations.
+Viewer Activity Integration
+---------------------------
+The `viewer_activity` pipeline computes and persists per-window metrics into
+`video_aggregates` and keeps `videos.eis_current` updated. The revenue_split
+logic reads these metrics; if a window aggregate is missing, it will call
+`viewer_activity.analyzer.analyze_window(video_id, start, end)` to compute it on
+the fly.
 
-SQL (run in Supabase SQL editor)
---------------------------------
+Tables Written
+--------------
+- `revenue_windows`: One row per finalized window with accounting and metadata.
+- `video_rev_shares`: Per-video allocation details and the share within a window.
+- `transactions`: Creator payouts and safety reserves (`payment_type`: payout/reserve).
+
+SQL (run once in Supabase SQL editor)
+------------------------------------
 Idempotent DDL for transparent audit tables and indexes:
 
 ```sql
@@ -63,19 +83,15 @@ alter table videos
 
 Usage
 -----
-1. Ensure `.env` includes `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for server-side use.
-2. Seed activity and compute EIS so `video_aggregates` has rows.
-3. Run: `streamlit run revenue_split/admin_revenue.py`.
-4. Verify:
-   - Sum of `video_rev_shares.allocated_cents` ≤ `revenue_windows.creator_pool_cents`.
-   - Platform margin = `(R_net - costs_est - CreatorPool)/R_gross ≥ margin_target`.
-   - Early natural/diverse videos get small +5% VU; clustered device/IP get down-weighted.
-   - High 7-day EIS creators receive +3% (renormalized to preserve the pool).
-  - `transactions` contains payout and reserve rows using schema: `recipient`, `amount_cents`, `status`, `payment_type`.
+1. Ensure `.env` includes `SUPABASE_URL` and a server key (service-role) for writes.
+2. Run your Viewer Activity pipeline (see `viewer_activity/README.md`) to populate
+   `video_aggregates`. Missing windows are computed on-demand.
+3. Call `finalize_revenue_window(start, end, ...)` from a server task or job.
+4. Inspect results directly in tables: `revenue_windows`, `video_rev_shares`, and `transactions`.
 
 Notes
 -----
-- All times are UTC.
-- Streamlit runs server-side; do not expose service keys to browser clients.
-- This module writes to `transactions` using your schema: `recipient` (FK to `users.id`), `amount_cents` (int8), `status` (text), `payment_type` (text, e.g., payout/reserve).
-- This module does not modify any existing EIS logic and is content-agnostic.
+- All times are UTC; start/end are treated as inclusive/exclusive [start, end).
+- Keys must remain server-side; never expose service-role keys to clients.
+- This module is content-agnostic and relies solely on schema-driven activity.
+

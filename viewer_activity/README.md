@@ -76,3 +76,8 @@ Success Criteria
 - The JSON “Details” shows features, breakdown, and component scores.
 - The chart shows EIS change over time for the chosen video.
 - No semantics are referenced anywhere in the Viewer Activity path.
+
+Revenue Split Integration
+- `revenue_split/finalize_revenue_window` consumes `video_aggregates` rows.
+- If a needed window aggregate is missing, it can call `analyzer.analyze_window(video_id, start, end)` to compute it on-demand before allocation.
+- Allocation weights are based on EIS and a small integrity modifier derived from `like_integrity` and `report_credibility`.
