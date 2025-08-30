@@ -1,6 +1,13 @@
-# analyzer.py (patched core)
-from supabase_manager import client, fetch_events, upsert_aggregate
-from scoring import (
+"""Viewer Activity analyzer (schema-driven, content-agnostic).
+
+Computes Engagement Integrity Score (EIS) and component metrics for a
+video over a given time window. This module only uses schema signals
+and writes transparent aggregates to `video_aggregates`, also updating
+`videos.eis_current`.
+"""
+
+from .supabase_manager import client, fetch_events, upsert_aggregate
+from .scoring import (
     get_vts_map,
     comment_quality_with_details,
     like_integrity_with_details,
@@ -13,12 +20,27 @@ from datetime import datetime, timedelta, timezone
 UTC = timezone.utc
 
 def analyze_window(video_id, start, end):
+    """Analyze a single video within [start, end) and persist aggregates.
+
+    Parameters
+    - video_id: int or str ID of the video in `videos`.
+    - start, end: timezone-aware datetimes in UTC; treated as [start, end).
+
+    Returns
+    - payload dict containing features, component scores, and `eis`.
+
+    Raises
+    - RuntimeError on Supabase connectivity or schema issues.
+    """
     # fetch creator_id to exclude creator’s self-engagement
     # Load video by videos.id (diagram schema)
     # Cast numeric IDs provided as strings for equality filter
     vid_filter = int(video_id) if isinstance(video_id, str) and video_id.isdigit() else video_id
-    res = client.table("videos").select("*").eq("id", vid_filter).single().execute()
-    vid = res.data
+    try:
+        res = client.table("videos").select("*").eq("id", vid_filter).single().execute()
+        vid = res.data
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to load video {video_id}: {e}")
     if not vid:
         raise RuntimeError("Video not found in 'videos' table")
     creator_id = vid.get("creator_id")

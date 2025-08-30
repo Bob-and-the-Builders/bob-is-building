@@ -1,3 +1,38 @@
+"""
+Revenue split allocation logic for short-form videos.
+
+This module computes an allocation for a given revenue window with the
+following key properties:
+
+- Pool sizing respects margin guardrails.
+- Video-level weights are computed from observed engagement volume and the
+  Viewer Activity (VA) metrics (EIS and component scores) produced by
+  `viewer_activity`.
+- Creator-level integrity streaks are rewarded modestly, then re-normalized
+  to preserve the pool size.
+
+Integration with viewer_activity
+--------------------------------
+We rely on the viewer_activity pipeline to compute and persist per-window
+metrics into `video_aggregates` and to maintain `videos.eis_current`.
+For each video in the window, we read:
+
+- `eis` (Engagement Integrity Score, 0..100)
+- `like_integrity` (0..100)
+- `report_credibility` (0..100)
+- `authentic_engagement` (0..100)
+
+If aggregates are missing for the window, we invoke
+`viewer_activity.analyzer.analyze_window(video_id, start, end)` to compute and
+persist them before proceeding.
+
+Error handling
+--------------
+External calls to Supabase are wrapped in small helpers and exceptions are
+raised with contextual messages to ease troubleshooting. All numeric inputs
+are validated and clamped to safe ranges where applicable.
+"""
+
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple
@@ -28,68 +63,142 @@ except Exception:
 UTC = timezone.utc
 clip = lambda x, lo, hi: float(max(lo, min(hi, x)))
 
+# Import viewer_activity analyzer to compute aggregates on-demand when missing.
+# Try as package import; on failure, add repo paths and retry to support
+# non-installed, local usage.
+va_analyze_window = None  # type: ignore
+try:
+    from viewer_activity.analyzer import analyze_window as va_analyze_window  # type: ignore
+except Exception:  # pragma: no cover - soft dependency
+    try:
+        import os, sys
+        this_dir = os.path.dirname(__file__)
+        repo_root = os.path.abspath(os.path.join(this_dir, os.pardir))
+        va_dir = os.path.join(repo_root, "viewer_activity")
+        for p in (repo_root, va_dir):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        from viewer_activity.analyzer import analyze_window as va_analyze_window  # type: ignore
+    except Exception:
+        va_analyze_window = None  # type: ignore
+
 
 def _sum_int(rows, key):
     return sum(int(r.get(key, 0) or 0) for r in rows)
 
 
-def _videos_in_window(sb, start: datetime, end: datetime):
-    ev = (
-        sb.table("event")
-        .select("video_id")
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
-    ids = sorted({int(r["video_id"]) for r in ev})
-    if not ids:
-        return []
-    return (
-        sb.table("videos").select("id,creator_id").in_("id", ids).execute().data or []
-    )
+def _videos_in_window(sb, start: datetime, end: datetime) -> List[Dict]:
+    """Return distinct videos that have any events in [start, end).
+
+    Returns a list of dicts with keys: `id`, `creator_id`.
+    Raises RuntimeError with context on Supabase failures.
+    """
+    try:
+        ev = (
+            sb.table("event")
+            .select("video_id")
+            .gte("ts", start.isoformat())
+            .lt("ts", end.isoformat())
+            .execute()
+            .data
+            or []
+        )
+        ids = sorted({int(r["video_id"]) for r in ev})
+        if not ids:
+            return []
+        return (
+            sb.table("videos").select("id,creator_id").in_("id", ids).execute().data or []
+        )
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to fetch videos for window {start}..{end}: {e}")
 
 
 def _eng_units(sb, vid: int, start: datetime, end: datetime) -> int:
-    ev = (
-        sb.table("event")
-        .select("event_type")
-        .eq("video_id", vid)
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
-    v = sum(1 for e in ev if e["event_type"] == "view")
-    l = sum(1 for e in ev if e["event_type"] == "like")
-    c = sum(1 for e in ev if e["event_type"] == "comment")
-    r = sum(1 for e in ev if e["event_type"] == "report")
+    """Compute a simple engagement volume proxy from raw events.
+
+    EngUnits = 1*views + 2*likes + 5*comments - 10*reports (clamped ≥ 0)
+    """
+    try:
+        ev = (
+            sb.table("event")
+            .select("event_type")
+            .eq("video_id", vid)
+            .gte("ts", start.isoformat())
+            .lt("ts", end.isoformat())
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to fetch events for video {vid}: {e}")
+    v = sum(1 for e in ev if e.get("event_type") == "view")
+    l = sum(1 for e in ev if e.get("event_type") == "like")
+    c = sum(1 for e in ev if e.get("event_type") == "comment")
+    r = sum(1 for e in ev if e.get("event_type") == "report")
     return max(0, v + 2 * l + 5 * c - 10 * r)
 
 
-def _avg_eis(sb, vid: int, start: datetime, end: datetime) -> float:
-    rows = (
-        sb.table("video_aggregates")
-        .select("eis,window_end")
-        .eq("video_id", vid)
-        .gte("window_end", start.isoformat())
-        .lt("window_end", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
+def _va_avg_metrics(sb, vid: int, start: datetime, end: datetime) -> Dict[str, float]:
+    """Average viewer_activity metrics for a video over [start, end).
+
+    Returns a dict with keys: `eis_avg`, `like_integrity_avg`,
+    `report_credibility_avg`, `authentic_engagement_avg`.
+
+    If aggregates are missing and `viewer_activity.analyzer` is available,
+    computes them on-demand.
+    """
+    def _fetch() -> List[Dict]:
+        return (
+            sb.table("video_aggregates")
+            .select("eis,like_integrity,report_credibility,authentic_engagement,window_start,window_end")
+            .eq("video_id", vid)
+            .gte("window_start", start.isoformat())
+            .lt("window_end", end.isoformat())
+            .execute()
+            .data
+            or []
+        )
+
+    try:
+        rows = _fetch()
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to fetch video_aggregates for video {vid}: {e}")
+
+    if not rows and va_analyze_window is not None:
+        try:  # compute on-demand once, then refetch
+            va_analyze_window(vid, start, end)
+            rows = _fetch()
+        except Exception:
+            rows = []
+
     if not rows:
-        return 0.0
-    vals = [float(r.get("eis") or 0.0) for r in rows]
-    return float(sum(vals) / len(vals)) if vals else 0.0
+        return {
+            "eis_avg": 0.0,
+            "like_integrity_avg": 50.0,
+            "report_credibility_avg": 90.0,
+            "authentic_engagement_avg": 50.0,
+        }
+
+    def _avg(key: str) -> float:
+        vals = [float(r.get(key) or 0.0) for r in rows]
+        return float(sum(vals) / len(vals)) if vals else 0.0
+
+    return {
+        "eis_avg": _avg("eis"),
+        "like_integrity_avg": _avg("like_integrity"),
+        "report_credibility_avg": _avg("report_credibility"),
+        "authentic_engagement_avg": _avg("authentic_engagement"),
+    }
 
 
 def _eligible_creator(sb, cid: int) -> bool:
-    u = (
-        sb.table("users").select("kyc_level,creator_trust_score").eq("id", cid).single().execute().data
-    )
+    """Eligibility gate for payouts: KYC level and creator trust baseline."""
+    try:
+        u = (
+            sb.table("users").select("kyc_level,creator_trust_score").eq("id", cid).single().execute().data
+        )
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to load user {cid} for eligibility: {e}")
     if not u:
         return False
     kyc = int(u.get("kyc_level") or 0)
@@ -97,88 +206,57 @@ def _eligible_creator(sb, cid: int) -> bool:
     return (kyc >= 2) and (cts >= 50.0)
 
 
-def _likes_in_range(sb, vid: int, start: datetime, end: datetime):
-    return (
-        sb.table("event")
-        .select("ts,device_id,ip_hash,user_id")
-        .eq("video_id", vid)
-        .eq("event_type", "like")
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .order("ts")
-        .execute()
-        .data
-        or []
-    )
+def _likes_in_range(sb, vid: int, start: datetime, end: datetime) -> List[Dict]:
+    """Fetch likes for diagnostics; not used in weighting anymore.
 
-
-def _first_hour_stats(sb, vid: int, start: datetime) -> Dict:
-    end = start + timedelta(hours=1)
-    likes = _likes_in_range(sb, vid, start, end)
-    if len(likes) < 3:
-        return {"cv": 0.0, "dev_div": 0.0, "ip_div": 0.0}
-    # inter-arrival CV
-    ts = [datetime.fromisoformat(str(x["ts"]).replace("Z", "+00:00")) for x in likes]
-    intervals = [(ts[i] - ts[i - 1]).total_seconds() for i in range(1, len(ts))]
-    if not intervals or sum(intervals) <= 0:
-        cv = 0.0
-    else:
-        mean_i = sum(intervals) / len(intervals)
-        cv = float(pstdev(intervals) / mean_i) if mean_i > 0 else 0.0
-    devs = [x.get("device_id") for x in likes if x.get("device_id")]
-    ips = [x.get("ip_hash") for x in likes if x.get("ip_hash")]
-    dev_div = (len(set(devs)) / len(likes)) if devs else 0.5
-    ip_div = (len(set(ips)) / len(likes)) if ips else 0.5
-    return {"cv": cv, "dev_div": float(dev_div), "ip_div": float(ip_div)}
-
-
-def _cluster_penalty(sb, vid: int, start: datetime, end: datetime) -> Tuple[float, Dict]:
-    likes = _likes_in_range(sb, vid, start, end)
-    if not likes:
-        return 1.0, {"users_per_device": None, "users_per_ip": None}
-    dev_users, ip_users = {}, {}
-    for l in likes:
-        uid = l.get("user_id")
-        d = l.get("device_id")
-        ip = l.get("ip_hash")
-        if d:
-            dev_users.setdefault(d, set()).add(uid)
-        if ip:
-            ip_users.setdefault(ip, set()).add(uid)
-    upd = (
-        (sum(len(s) for s in dev_users.values()) / max(1, len(dev_users))) if dev_users else 0.0
-    )
-    upi = (sum(len(s) for s in ip_users.values()) / max(1, len(ip_users))) if ip_users else 0.0
-    excess_device = max(0.0, upd - 1.5)
-    excess_ip = max(0.0, upi - 2.0)
-    penalty = clip(1.0 - 0.05 * max(excess_device, excess_ip), 0.85, 1.0)
-    return float(penalty), {
-        "users_per_device": upd or None,
-        "users_per_ip": upi or None,
-        "excess_device": excess_device,
-        "excess_ip": excess_ip,
-    }
+    Kept for potential future audits; current allocation relies on
+    viewer_activity's integrity components instead.
+    """
+    try:
+        return (
+            sb.table("event")
+            .select("ts,device_id,ip_hash,user_id")
+            .eq("video_id", vid)
+            .eq("event_type", "like")
+            .gte("ts", start.isoformat())
+            .lt("ts", end.isoformat())
+            .order("ts")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to fetch likes for video {vid}: {e}")
 
 
 def _creator_7d_avg_eis(sb, cid: int, asof: datetime) -> float:
-    # mean of videos.eis_current for creator’s videos updated within last 7d
+    """Average of `videos.eis_current` for creator in the last 7 days."""
     since = asof - timedelta(days=7)
-    vids = (
-        sb.table("videos")
-        .select("eis_current,eis_updated_at,creator_id")
-        .eq("creator_id", cid)
-        .execute()
-        .data
-        or []
-    )
-    vals = []
+    try:
+        vids = (
+            sb.table("videos")
+            .select("eis_current,eis_updated_at,creator_id")
+            .eq("creator_id", cid)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to load creator videos for {cid}: {e}")
+    vals: List[float] = []
     for v in vids:
         t = v.get("eis_updated_at")
         if not t:
             continue
-        dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        try:
+            dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        except Exception:
+            continue
         if dt >= since:
-            vals.append(float(v.get("eis_current") or 0.0))
+            try:
+                vals.append(float(v.get("eis_current") or 0.0))
+            except Exception:
+                pass
     return float(sum(vals) / len(vals)) if vals else 0.0
 
 
@@ -199,17 +277,37 @@ def finalize_revenue_window(
     min_payout_cents: int = 1000,
     hold_days: int = 14,
 ) -> Dict:
+    """Finalize a revenue window and persist allocations.
+
+    Inputs use UTC datetimes for the window and accounting figures in cents.
+    The creator pool is sized from net revenue subject to a margin target.
+
+    Video weights combine a volume proxy (EngUnits) and the VA EIS: `VU =
+    EngUnits * (EIS/100)^gamma * integrity_mod`, where `integrity_mod` is a
+    small multiplier derived from viewer_activity component scores
+    (like_integrity and report_credibility) to reward clean engagement.
+
+    Returns a dict with `revenue_window`, `video_rev_shares`, and
+    `creator_payouts` as echoed from inserts.
+    """
     sb = get_supabase_client(prefer_service=True)
 
-    R_gross = int(gross_revenue_cents)
-    taxes = int(taxes_cents)
-    store = int(app_store_fees_cents)
-    refunds = int(refunds_cents)
+    if start.tzinfo is None or end.tzinfo is None:
+        # Attach UTC if naive to avoid window leakage
+        start = start.replace(tzinfo=UTC)
+        end = end.replace(tzinfo=UTC)
+    if start >= end:
+        raise ValueError("start must be before end")
+
+    R_gross = max(0, int(gross_revenue_cents))
+    taxes = max(0, int(taxes_cents))
+    store = max(0, int(app_store_fees_cents))
+    refunds = max(0, int(refunds_cents))
     R_net = max(0, R_gross - taxes - store - refunds)
 
     # Base pool and margin guardrail
-    pool_base = int(pool_pct * R_net)
-    pool_max_by_margin = max(0, R_net - costs_est_cents - int(margin_target * R_gross))
+    pool_base = int(float(pool_pct) * R_net)
+    pool_max_by_margin = max(0, R_net - int(costs_est_cents) - int(float(margin_target) * R_gross))
     CreatorPool = min(pool_base, pool_max_by_margin)
 
     # Collect eligible videos with EngUnits, EIS, and VU (apply 2 refinements at video level)
@@ -223,18 +321,14 @@ def finalize_revenue_window(
         eng = _eng_units(sb, vid, start, end)
         if eng == 0:
             continue
-        eis_avg = _avg_eis(sb, vid, start, end)
-        m = (clip(eis_avg, 0.0, 100.0) / 100.0) ** gamma
-        vu = eng * m
-
-        # (3) Early-Velocity Kicker in first hour
-        fv = _first_hour_stats(sb, vid, start)
-        velocity_kicker = 1.05 if (fv["cv"] >= 1.0 and max(fv["dev_div"], fv["ip_div"]) >= 0.8) else 1.00
-        vu *= velocity_kicker
-
-        # (4) Cluster Penalty Escalator over full window
-        cp_mult, cp_det = _cluster_penalty(sb, vid, start, end)
-        vu *= cp_mult
+        va = _va_avg_metrics(sb, vid, start, end)
+        eis_avg = va["eis_avg"]
+        m = (clip(eis_avg, 0.0, 100.0) / 100.0) ** float(gamma)
+        # Integrity modifier uses viewer_activity component scores
+        li = clip(va.get("like_integrity_avg", 50.0), 0.0, 100.0) / 100.0
+        rc = clip(va.get("report_credibility_avg", 90.0), 0.0, 100.0) / 100.0
+        integrity_mod = clip(0.85 + 0.15 * (li * rc), 0.85, 1.0)
+        vu = eng * m * integrity_mod
 
         v_metrics.append(
             {
@@ -242,11 +336,16 @@ def finalize_revenue_window(
                 "creator_id": cid,
                 "eng_units": eng,
                 "eis_avg": eis_avg,
-                "vu": vu,
+                "vu": float(vu),
                 "meta": {
-                    "velocity": fv,
-                    "cluster_penalty": cp_det | {"multiplier": cp_mult},
-                    "velocity_kicker": velocity_kicker,
+                    "viewer_activity": {
+                        "eis_avg": eis_avg,
+                        "like_integrity_avg": va.get("like_integrity_avg"),
+                        "report_credibility_avg": va.get("report_credibility_avg"),
+                        "authentic_engagement_avg": va.get("authentic_engagement_avg"),
+                        "integrity_mod": integrity_mod,
+                        "gamma": float(gamma),
+                    }
                 },
             }
         )
@@ -286,29 +385,32 @@ def finalize_revenue_window(
     CreatorPool = min(pool_max_by_margin, int(CreatorPool * (1.0 + q_adj)))
 
     # Insert revenue_window
-    win = (
-        sb.table("revenue_windows")
-        .insert(
-            {
-                "window_start": start.isoformat(),
-                "window_end": end.isoformat(),
-                "gross_revenue_cents": R_gross,
-                "taxes_cents": taxes,
-                "app_store_fees_cents": store,
-                "refunds_cents": refunds,
-                "pool_pct": pool_pct,
-                "margin_target": margin_target,
-                "risk_reserve_pct": risk_reserve_pct,
-                "platform_fee_pct": platform_fee_pct,
-                "costs_est_cents": costs_est_cents,
-                "creator_pool_cents": CreatorPool,
-                "meta": {"avg_eis_platform": avg_eis_platform, "q_adj": q_adj},
-            }
-        )
-        .execute()
-        .data
-        or [None]
-    )[0]
+    try:
+        win = (
+            sb.table("revenue_windows")
+            .insert(
+                {
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "gross_revenue_cents": R_gross,
+                    "taxes_cents": taxes,
+                    "app_store_fees_cents": store,
+                    "refunds_cents": refunds,
+                    "pool_pct": pool_pct,
+                    "margin_target": margin_target,
+                    "risk_reserve_pct": risk_reserve_pct,
+                    "platform_fee_pct": platform_fee_pct,
+                    "costs_est_cents": costs_est_cents,
+                    "creator_pool_cents": CreatorPool,
+                    "meta": {"avg_eis_platform": avg_eis_platform, "q_adj": q_adj},
+                }
+            )
+            .execute()
+            .data
+            or [None]
+        )[0]
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to insert revenue_window: {e}")
     win_id = int(win["id"])
 
     # Normalize VU -> shares within CreatorPool
@@ -333,7 +435,10 @@ def finalize_revenue_window(
         alloc_by_creator[vm["creator_id"]] = alloc_by_creator.get(vm["creator_id"], 0) + alloc
 
     if vrs_rows:
-        sb.table("video_rev_shares").insert(vrs_rows).execute()
+        try:
+            sb.table("video_rev_shares").insert(vrs_rows).execute()
+        except Exception as e:  # pragma: no cover - external I/O
+            raise RuntimeError(f"Failed to insert video_rev_shares: {e}")
 
     # (2) Integrity Streak Bonus at creator level (±3%), then re-normalize to pool
     now = datetime.now(UTC)
@@ -352,36 +457,36 @@ def finalize_revenue_window(
     for cid in scaled:
         scaled[cid] = int(scaled[cid] * factor)
 
-    # Write creator payouts/reserves to transactions
+    # Write creator payouts/reserves to transactions (schema: recipient, amount_cents, status, payment_type)
     payouts = []
-    hold_until = (now.replace(microsecond=0) + timedelta(days=hold_days)).isoformat()
     for cid, alloc_c in scaled.items():
-        platform_fee = int(platform_fee_pct * alloc_c)
-        reserve = int(risk_reserve_pct * alloc_c)
+        platform_fee = int(float(platform_fee_pct) * alloc_c)
+        reserve = int(float(risk_reserve_pct) * alloc_c)
         pay_now = alloc_c - platform_fee - reserve
         if pay_now < min_payout_cents:
             reserve += pay_now
             pay_now = 0
-        if pay_now > 0:
-            sb.table("transactions").insert(
-                {
-                    "user_id": cid,
-                    "type": "payout",
-                    "amount_cents": pay_now,
-                    "status": "pending",
-                    "hold_until": now.isoformat(),
-                }
-            ).execute()
-        if reserve > 0:
-            sb.table("transactions").insert(
-                {
-                    "user_id": cid,
-                    "type": "reserve",
-                    "amount_cents": reserve,
-                    "status": "on_hold",
-                    "hold_until": hold_until,
-                }
-            ).execute()
+        try:
+            if pay_now > 0:
+                sb.table("transactions").insert(
+                    {
+                        "recipient": cid,
+                        "payment_type": "payout",
+                        "amount_cents": pay_now,
+                        "status": "pending",
+                    }
+                ).execute()
+            if reserve > 0:
+                sb.table("transactions").insert(
+                    {
+                        "recipient": cid,
+                        "payment_type": "reserve",
+                        "amount_cents": reserve,
+                        "status": "on_hold",
+                    }
+                ).execute()
+        except Exception as e:  # pragma: no cover - external I/O
+            raise RuntimeError(f"Failed to insert transactions for creator {cid}: {e}")
         payouts.append(
             {
                 "creator_id": cid,
@@ -394,4 +499,3 @@ def finalize_revenue_window(
         )
 
     return {"revenue_window": win, "video_rev_shares": vrs_rows, "creator_payouts": payouts}
-

@@ -6,7 +6,7 @@ import os
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_SECRET")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 st.session_state['supabase'] = supabase

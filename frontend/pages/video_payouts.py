@@ -51,18 +51,11 @@ def get_payout_data(user_id: int):
         # Fallback balance computation if not in users.current_balance
         if not current_balance_cents:
             if not transactions_df.empty:
-                # Available = sum of payout amounts not on hold (exclude reserves and future holds)
-                now_iso = pd.Timestamp.utcnow().tz_localize(None)
+                # Available = sum of completed payout amounts (exclude reserves and on_hold)
                 df = transactions_df.copy()
-                # Parse hold_until if present
-                if "hold_until" in df.columns:
-                    df["hold_until_ts"] = pd.to_datetime(df["hold_until"], errors="coerce", utc=True).dt.tz_convert(None)
-                else:
-                    df["hold_until_ts"] = pd.NaT
-                is_payout = df.get("type", pd.Series([])).eq("payout") if "type" in df.columns else pd.Series(False, index=df.index)
-                not_on_hold = (~df.get("status", pd.Series([])).eq("on_hold")) if "status" in df.columns else pd.Series(True, index=df.index)
-                hold_released = (df["hold_until_ts"].isna()) | (df["hold_until_ts"] <= now_iso)
-                mask = is_payout & not_on_hold & hold_released
+                is_payout = df.get("payment_type", pd.Series([])).eq("payout") if "payment_type" in df.columns else pd.Series(False, index=df.index)
+                is_completed = df.get("status", pd.Series([])).eq("completed") if "status" in df.columns else pd.Series(False, index=df.index)
+                mask = is_payout & is_completed
                 current_balance_cents = int(df.loc[mask, "amount_cents"].fillna(0).sum())
 
         return {"balance_cents": int(current_balance_cents or 0), "transactions": transactions_df}
@@ -127,8 +120,7 @@ if not transactions_df.empty:
     if 'created_at' in display_df.columns: cols.append('created_at')
     cols.append('Amount (USD)')
     if 'status' in display_df.columns: cols.append('status')
-    if 'type' in display_df.columns: cols.append('type')
-    if 'hold_until' in display_df.columns: cols.append('hold_until')
+    if 'payment_type' in display_df.columns: cols.append('payment_type')
 
     if 'created_at' in display_df.columns:
         display_df = display_df.sort_values('created_at', ascending=False)
@@ -140,8 +132,7 @@ if not transactions_df.empty:
             "created_at": st.column_config.DatetimeColumn("Date", help="The date and time of the transaction."),
             "Amount (USD)": st.column_config.NumberColumn(format="$%.2f", help="The transaction amount in US dollars."),
             "status": st.column_config.TextColumn("Status", help="The current status of the transaction (e.g., pending, on_hold, completed)."),
-            "type": st.column_config.TextColumn("Type", help="Transaction type (payout, reserve, etc.)."),
-            "hold_until": st.column_config.DatetimeColumn("Hold Until", help="Funds are released after this time (UTC)."),
+            "payment_type": st.column_config.TextColumn("Type", help="Transaction type (payout, reserve, etc.)."),
         }
     )
 else:
@@ -153,18 +144,43 @@ st.write("---")
 st.subheader("Request a Payout")
 st.write(f"Your current available balance for withdrawal is **${balance_cents / 100:,.2f}**.")
 
+# New: payout method selector
+payment_method = st.selectbox(
+    "Payout method",
+    options=["bank_transfer", "card", "wallet", "paypal"],
+    index=0,
+    help="Choose where we should send your payout."
+)
 
 amount_to_withdraw = st.number_input(
     label="Amount to withdraw (USD)",
     min_value=5.00,
     max_value=float(balance_cents / 100),
-    value=max(5.00, float(balance_cents / 100)), # Default to max available or $5
+    value=max(5.00, float(balance_cents / 100)),  # Default to max available or $5
     step=5.00,
     format="%.2f",
-    disabled=(balance_cents < 500) # Disable if balance is less than $5
+    disabled=(balance_cents < 500)  # Disable if balance is less than $5
 )
+
 if st.button("Request Payout", disabled=(balance_cents < 500)):
-    # In a real app, this is where you would trigger a Supabase Edge Function
-    # or an API call to your backend to process the payout.
     st.success(f"Your payout request for ${amount_to_withdraw:,.2f} has been submitted for processing!")
-   
+    amount_cents = int(amount_to_withdraw * 100)
+    curr_user = st.session_state.get("user")
+    email = getattr(user, "email", None)
+    res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
+    curr_user_id = res.data.get("user_id") if res.data else None
+    res = supabase.table("users").select("kyc_level").eq("id", user_id).single().execute()
+    kyc_level = res.data.get("kyc_level") if res.data else 0
+
+    if kyc_level == 2 and amount_cents >= 50000:
+        st.warning("Payouts of $500 or more require KYC Level 3 verification. Please complete KYC Level 3 to proceed.")
+    elif kyc_level == 1 and amount_cents >= 10000:
+        st.warning("Payouts of $100 or more require KYC Level 2 verification. Please complete KYC Level 2 to proceed.")
+    else:
+        supabase.table("transactions").insert({
+            "recipient": curr_user_id,
+            "amount_cents": amount_cents,
+            "payment_type": payment_method,
+            "status": "pending"
+        }).execute()
+        st.info("Payout request submitted. It may take a few days to process.")
