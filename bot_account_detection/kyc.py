@@ -339,10 +339,9 @@ def get_user_documents(supabase_client, user_id: int) -> List[DocumentInfo]:
             if doc_type_str not in [e.name for e in DocumentType]:
                 print(f"Warning: Invalid document type '{doc_type_str}', skipping document")
                 continue
-                
+
             documents.append(
                 DocumentInfo(
-                    document_id=doc.get("id"),
                     full_name=doc.get("full_name"),
                     document_type=DocumentType[doc_type_str],
                     document_number=doc.get("document_number"),
