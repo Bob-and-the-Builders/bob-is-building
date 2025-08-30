@@ -6,7 +6,7 @@ from typing import List, Optional
 import json
 
 # Add the bot_account_detection directory to the Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../bot_account_detection'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from bot_account_detection import KYCManager, PersonalInfo, DocumentInfo, KYCResult, KYCStatus, KYCLevel, DocumentType, PhoneTrustScore, TrustLevel
 
