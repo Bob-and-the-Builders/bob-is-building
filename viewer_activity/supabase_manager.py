@@ -48,43 +48,60 @@ class ViewerEvent:
         return d
 
 def insert_events(events: List[ViewerEvent]):
+    """Bulk insert viewer events into `event` table.
+
+    Raises RuntimeError with context if insertion fails.
+    """
     if not events:
         return
     rows = [e.to_row() for e in events]
-    client.table("event").insert(rows).execute()
+    try:
+        client.table("event").insert(rows).execute()
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to insert events: {e}")
 
 def fetch_events(video_id: str, start: datetime, end: datetime):
-    data = (
-        client.table("event")
-        .select("*")
-        .eq("video_id", video_id)
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .order("ts")
-        .execute()
-        .data
-        or []
-    )
-    return data
+    """Fetch events for a video within [start, end). Returns a list of dicts."""
+    try:
+        data = (
+            client.table("event")
+            .select("*")
+            .eq("video_id", video_id)
+            .gte("ts", start.isoformat())
+            .lt("ts", end.isoformat())
+            .order("ts")
+            .execute()
+            .data
+            or []
+        )
+        return data
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to fetch events for video {video_id}: {e}")
 
 def upsert_aggregate(video_id: str, ws, we, payload: Dict):
-    # Persist transparent aggregates for auditability and update current EIS on videos
-    client.table("video_aggregates").insert(
-        {
-            "video_id": int(video_id),
-            "window_start": ws.isoformat(),
-            "window_end": we.isoformat(),
-            "features": payload.get("features", {}),
-            "comment_quality": payload.get("comment_quality"),
-            "like_integrity": payload.get("like_integrity"),
-            "report_credibility": payload.get("report_credibility"),
-            "authentic_engagement": payload.get("authentic_engagement"),
-            "eis": payload.get("eis"),
-        }
-    ).execute()
-    client.table("videos").update(
-        {
-            "eis_current": payload.get("eis"),
-            "eis_updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).eq("id", int(video_id)).execute()
+    """Insert a `video_aggregates` row and update `videos.eis_current`.
+
+    Raises RuntimeError with context if DB operations fail.
+    """
+    try:
+        client.table("video_aggregates").insert(
+            {
+                "video_id": int(video_id),
+                "window_start": ws.isoformat(),
+                "window_end": we.isoformat(),
+                "features": payload.get("features", {}),
+                "comment_quality": payload.get("comment_quality"),
+                "like_integrity": payload.get("like_integrity"),
+                "report_credibility": payload.get("report_credibility"),
+                "authentic_engagement": payload.get("authentic_engagement"),
+                "eis": payload.get("eis"),
+            }
+        ).execute()
+        client.table("videos").update(
+            {
+                "eis_current": payload.get("eis"),
+                "eis_updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", int(video_id)).execute()
+    except Exception as e:  # pragma: no cover - external I/O
+        raise RuntimeError(f"Failed to upsert aggregates for video {video_id}: {e}")
