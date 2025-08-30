@@ -31,3 +31,33 @@ def display_eis_gauge(score: float, title: str = "Engagement Integrity Score") -
 def display_metric_card(title: str, value: str, help_text: Optional[str] = None) -> None:
     """Wrapper around st.metric for consistency."""
     st.metric(label=title, value=value, help=help_text)
+
+
+def display_anomaly_card(
+    title: str,
+    score: float,
+    explanation: str,
+    recommendation: str,
+    details: str,
+    severity: str = "warning",
+) -> None:
+    """Render a card-like anomaly diagnostic with score, context and guidance.
+
+    Parameters
+    ----------
+    title: Short title for the anomaly.
+    score: Numeric score (0-100) for the metric.
+    explanation: Brief description of what the signal means.
+    recommendation: Actionable next steps to resolve/improve.
+    details: Additional context shown inside an expander.
+    severity: "alert" -> red icon; "warning" -> yellow icon.
+    """
+    icon = "🔴" if severity == "alert" else "🟡"
+    with st.container(border=True):
+        st.write(f"### {icon} {title}")
+        st.metric(label="Score", value=f"{float(score):.1f} / 100")
+        st.write(explanation)
+        st.markdown("**Recommended Action:**")
+        st.write(recommendation)
+        with st.expander("View Details"):
+            st.write(details)
