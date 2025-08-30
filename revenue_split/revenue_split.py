@@ -1,393 +1,300 @@
+# revenue_split/revenue_split.py
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple
-from math import isfinite
-from statistics import pstdev
 
-# Prefer importing a provided helper, but fall back to local client creation
-try:
-    from supabase_conn import get_supabase_client  # type: ignore
-except Exception:
-    # Back-compat shim if repo doesn't expose get_supabase_client(prefer_service=True)
-    # Uses service role key if available; falls back to anon (not recommended for writes).
-    import os
-    from supabase import create_client
+import os
+import math
+from datetime import datetime, date, timedelta, timezone
+from collections import defaultdict, Counter
+from typing import Dict, List, Tuple, Optional
 
-    def get_supabase_client(prefer_service: bool = True):  # type: ignore
-        url = os.environ.get("SUPABASE_URL")
-        key = (
-            os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-            if prefer_service
-            else os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_SECRET")
-        )
-        if not url or not key:
-            raise RuntimeError("Missing SUPABASE_URL or service key in environment")
-        return create_client(url, key)
+from supabase import create_client, Client
 
+# -----------------------------
+# Knobs
+# -----------------------------
+QUALITY_Z_TO_PCT   = 0.01     # z * 1% → clamped below
+QUALITY_CLAMP_PCT  = 0.02     # ±2%
 
-UTC = timezone.utc
-clip = lambda x, lo, hi: float(max(lo, min(hi, x)))
+INTEGRITY_RANGE_PCT = 0.03    # ±3% mapped from 0..1
+EARLY_WINDOW_HRS    = 2
+EARLY_KICKER_MULT   = 1.05
+EARLY_MIN_VIEWS     = 50
+EARLY_DEV_RATIO     = 0.50
+EARLY_IP_RATIO      = 0.40
 
+CLUSTER_START_SHARE = 0.20
+CLUSTER_MAX_PENALTY = 0.30
+CLUSTER_RAMP        = 2.0
 
-def _sum_int(rows, key):
-    return sum(int(r.get(key, 0) or 0) for r in rows)
+EVENT_WEIGHTS = {"view": 1, "like": 3, "comment": 5, "share": 8}
+PAGE_SIZE = 10000
 
+# -----------------------------
+# Supabase helpers
+# -----------------------------
+def make_client() -> Client:
+    url = os.environ["SUPABASE_URL"]
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    return create_client(url, key)
 
-def _videos_in_window(sb, start: datetime, end: datetime):
-    ev = (
-        sb.table("event")
-        .select("video_id")
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
-    ids = sorted({int(r["video_id"]) for r in ev})
-    if not ids:
-        return []
-    return (
-        sb.table("videos").select("id,creator_id").in_("id", ids).execute().data or []
-    )
+def daterange_utc(d: date) -> Tuple[str, str]:
+    start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    end   = start + timedelta(days=1)
+    return start.isoformat(), end.isoformat()
 
+def fetch_all(builder_fn, page_size=PAGE_SIZE) -> List[dict]:
+    out: List[dict] = []
+    from_idx = 0
+    while True:
+        q = builder_fn().range(from_idx, from_idx + page_size - 1)
+        res = q.execute()
+        rows = res.data or []
+        out.extend(rows)
+        if len(rows) < page_size:
+            break
+        from_idx += page_size
+    return out
 
-def _eng_units(sb, vid: int, start: datetime, end: datetime) -> int:
-    ev = (
-        sb.table("event")
-        .select("event_type")
-        .eq("video_id", vid)
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
-    v = sum(1 for e in ev if e["event_type"] == "view")
-    l = sum(1 for e in ev if e["event_type"] == "like")
-    c = sum(1 for e in ev if e["event_type"] == "comment")
-    r = sum(1 for e in ev if e["event_type"] == "report")
-    return max(0, v + 2 * l + 5 * c - 10 * r)
+def iso_to_dt(s: str) -> datetime:
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
+# -----------------------------
+# Data loads
+# -----------------------------
+def load_events_for_day(sb: Client, run_day: date) -> List[dict]:
+    start, end = daterange_utc(run_day)
+    return fetch_all(lambda: sb.table("event").select("*").gte("ts", start).lt("ts", end))
 
-def _avg_eis(sb, vid: int, start: datetime, end: datetime) -> float:
-    rows = (
-        sb.table("video_aggregates")
-        .select("eis,window_end")
-        .eq("video_id", vid)
-        .gte("window_end", start.isoformat())
-        .lt("window_end", end.isoformat())
-        .execute()
-        .data
-        or []
-    )
-    if not rows:
-        return 0.0
-    vals = [float(r.get("eis") or 0.0) for r in rows]
-    return float(sum(vals) / len(vals)) if vals else 0.0
+def load_events_between(sb: Client, start: datetime, end: datetime) -> List[dict]:
+    return fetch_all(lambda: sb.table("event").select("*").gte("ts", start.isoformat()).lt("ts", end.isoformat()))
 
+def load_videos(sb: Client) -> Dict[int, dict]:
+    rows = fetch_all(lambda: sb.table("videos").select("*"))
+    return {r["id"]: r for r in rows}
 
-def _eligible_creator(sb, cid: int) -> bool:
-    u = (
-        sb.table("users").select("kyc_level,creator_trust_score").eq("id", cid).single().execute().data
-    )
-    if not u:
-        return False
-    kyc = int(u.get("kyc_level") or 0)
-    cts = float(u.get("creator_trust_score") or 0.0)
-    return (kyc >= 2) and (cts >= 50.0)
+def load_users(sb: Client) -> Dict[int, dict]:
+    rows = fetch_all(lambda: sb.table("users").select("*"))
+    return {r["id"]: r for r in rows}
 
+# -----------------------------
+# Multipliers
+# -----------------------------
+def clamp(x: float, low: float, high: float) -> float:
+    return max(low, min(high, x))
 
-def _likes_in_range(sb, vid: int, start: datetime, end: datetime):
-    return (
-        sb.table("event")
-        .select("ts,device_id,ip_hash,user_id")
-        .eq("video_id", vid)
-        .eq("event_type", "like")
-        .gte("ts", start.isoformat())
-        .lt("ts", end.isoformat())
-        .order("ts")
-        .execute()
-        .data
-        or []
-    )
+def quality_multiplier(engagement_rate: float, mu: float, sigma: float) -> float:
+    if sigma == 0:
+        return 1.0
+    z = (engagement_rate - mu) / sigma
+    nudged = z * QUALITY_Z_TO_PCT
+    return 1.0 + clamp(nudged, -QUALITY_CLAMP_PCT, QUALITY_CLAMP_PCT)
 
+def integrity_multiplier_7d(views: int, uniq_dev: int, uniq_ip: int, likes: int, comments: int) -> float:
+    dev_div = min(1.0, 5.0 * (uniq_dev / max(1.0, views)))
+    ip_div  = min(1.0, 5.0 * (uniq_ip  / max(1.0, views)))
+    eng_h   = min(1.0, 10.0 * ((likes + comments) / max(1.0, views)))
+    score_0_1 = (dev_div + ip_div + eng_h) / 3.0
+    # Map 0..1 → 1±3%
+    return (1.0 - INTEGRITY_RANGE_PCT) + (score_0_1 * 2 * INTEGRITY_RANGE_PCT)
 
-def _first_hour_stats(sb, vid: int, start: datetime) -> Dict:
-    end = start + timedelta(hours=1)
-    likes = _likes_in_range(sb, vid, start, end)
-    if len(likes) < 3:
-        return {"cv": 0.0, "dev_div": 0.0, "ip_div": 0.0}
-    # inter-arrival CV
-    ts = [datetime.fromisoformat(str(x["ts"]).replace("Z", "+00:00")) for x in likes]
-    intervals = [(ts[i] - ts[i - 1]).total_seconds() for i in range(1, len(ts))]
-    if not intervals or sum(intervals) <= 0:
-        cv = 0.0
-    else:
-        mean_i = sum(intervals) / len(intervals)
-        cv = float(pstdev(intervals) / mean_i) if mean_i > 0 else 0.0
-    devs = [x.get("device_id") for x in likes if x.get("device_id")]
-    ips = [x.get("ip_hash") for x in likes if x.get("ip_hash")]
-    dev_div = (len(set(devs)) / len(likes)) if devs else 0.5
-    ip_div = (len(set(ips)) / len(likes)) if ips else 0.5
-    return {"cv": cv, "dev_div": float(dev_div), "ip_div": float(ip_div)}
+def early_kicker_mult_for_video(sb: Client, video_row: dict) -> float:
+    """
+    Compute early velocity in the first 2 hours AFTER creation (global time window),
+    not just within the run_day. This crosses day boundaries if needed.
+    """
+    created_at = iso_to_dt(video_row["created_at"])
+    window_end = created_at + timedelta(hours=EARLY_WINDOW_HRS)
+    evs = load_events_between(sb, created_at, window_end)
 
+    # Filter to this video
+    early = [e for e in evs if e.get("video_id") == video_row["id"]]
+    if not early:
+        return 1.0
 
-def _cluster_penalty(sb, vid: int, start: datetime, end: datetime) -> Tuple[float, Dict]:
-    likes = _likes_in_range(sb, vid, start, end)
-    if not likes:
-        return 1.0, {"users_per_device": None, "users_per_ip": None}
-    dev_users, ip_users = {}, {}
-    for l in likes:
-        uid = l.get("user_id")
-        d = l.get("device_id")
-        ip = l.get("ip_hash")
-        if d:
-            dev_users.setdefault(d, set()).add(uid)
-        if ip:
-            ip_users.setdefault(ip, set()).add(uid)
-    upd = (
-        (sum(len(s) for s in dev_users.values()) / max(1, len(dev_users))) if dev_users else 0.0
-    )
-    upi = (sum(len(s) for s in ip_users.values()) / max(1, len(ip_users))) if ip_users else 0.0
-    excess_device = max(0.0, upd - 1.5)
-    excess_ip = max(0.0, upi - 2.0)
-    penalty = clip(1.0 - 0.05 * max(excess_device, excess_ip), 0.85, 1.0)
-    return float(penalty), {
-        "users_per_device": upd or None,
-        "users_per_ip": upi or None,
-        "excess_device": excess_device,
-        "excess_ip": excess_ip,
-    }
+    views = sum(1 for e in early if e["event_type"] == "view")
+    if views < EARLY_MIN_VIEWS:
+        return 1.0
 
+    uniq_dev = len({e.get("device_id") for e in early if e.get("device_id") is not None})
+    uniq_ip  = len({e.get("ip_hash") for e in early if e.get("ip_hash") is not None})
 
-def _creator_7d_avg_eis(sb, cid: int, asof: datetime) -> float:
-    # mean of videos.eis_current for creator’s videos updated within last 7d
-    since = asof - timedelta(days=7)
-    vids = (
-        sb.table("videos")
-        .select("eis_current,eis_updated_at,creator_id")
-        .eq("creator_id", cid)
-        .execute()
-        .data
-        or []
-    )
-    vals = []
-    for v in vids:
-        t = v.get("eis_updated_at")
-        if not t:
-            continue
-        dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
-        if dt >= since:
-            vals.append(float(v.get("eis_current") or 0.0))
-    return float(sum(vals) / len(vals)) if vals else 0.0
+    if uniq_dev >= EARLY_DEV_RATIO * views and uniq_ip >= EARLY_IP_RATIO * views:
+        return EARLY_KICKER_MULT
+    return 1.0
 
+def cluster_penalty_mult(day_events_for_video: List[dict]) -> float:
+    views = [e for e in day_events_for_video if e["event_type"] == "view"]
+    if not views:
+        return 1.0
+    dev_counts = Counter([e.get("device_id") for e in views if e.get("device_id") is not None])
+    ip_counts  = Counter([e.get("ip_hash")   for e in views if e.get("ip_hash") is not None])
 
-def finalize_revenue_window(
-    start: datetime,
-    end: datetime,
-    *,
-    gross_revenue_cents: int,
-    taxes_cents: int,
-    app_store_fees_cents: int,
-    refunds_cents: int,
-    pool_pct: float = 0.45,
-    margin_target: float = 0.60,
-    risk_reserve_pct: float = 0.10,
-    platform_fee_pct: float = 0.10,
-    costs_est_cents: int = 0,
-    gamma: float = 2.0,
-    min_payout_cents: int = 1000,
-    hold_days: int = 14,
-) -> Dict:
-    sb = get_supabase_client(prefer_service=True)
+    def top_share(cnt: Counter) -> float:
+        total = sum(cnt.values())
+        return 0.0 if total == 0 else (max(cnt.values()) / total)
 
-    R_gross = int(gross_revenue_cents)
-    taxes = int(taxes_cents)
-    store = int(app_store_fees_cents)
-    refunds = int(refunds_cents)
-    R_net = max(0, R_gross - taxes - store - refunds)
+    ts = max(top_share(dev_counts), top_share(ip_counts))
+    if ts <= CLUSTER_START_SHARE:
+        return 1.0
+    penalty = CLUSTER_RAMP * (ts - CLUSTER_START_SHARE)
+    return max(1.0 - CLUSTER_MAX_PENALTY, 1.0 - penalty)
 
-    # Base pool and margin guardrail
-    pool_base = int(pool_pct * R_net)
-    pool_max_by_margin = max(0, R_net - costs_est_cents - int(margin_target * R_gross))
-    CreatorPool = min(pool_base, pool_max_by_margin)
+# -----------------------------
+# RevenueSplitter
+# -----------------------------
+class RevenueSplitter:
+    """
+    Two APIs:
 
-    # Collect eligible videos with EngUnits, EIS, and VU (apply 2 refinements at video level)
-    vids = _videos_in_window(sb, start, end)
-    v_metrics = []
-    for v in vids:
-        vid = int(v["id"])
-        cid = int(v["creator_id"])
-        if not _eligible_creator(sb, cid):
-            continue
-        eng = _eng_units(sb, vid, start, end)
-        if eng == 0:
-            continue
-        eis_avg = _avg_eis(sb, vid, start, end)
-        m = (clip(eis_avg, 0.0, 100.0) / 100.0) ** gamma
-        vu = eng * m
+    1) compute_units(run_day) -> Dict[creator_id, float]
+       Returns per-creator "units" for that day (after all per-video multipliers
+       AND after creator-level integrity multiplier), without rounding/writing.
 
-        # (3) Early-Velocity Kicker in first hour
-        fv = _first_hour_stats(sb, vid, start)
-        velocity_kicker = 1.05 if (fv["cv"] >= 1.0 and max(fv["dev_div"], fv["ip_div"]) >= 0.8) else 1.00
-        vu *= velocity_kicker
+    2) run(pool_cents, run_day, payment_type="revenue_split", dry_run=False)
+       Scales the day's units to cents, optionally writes transactions with
+       direction='inflow' and bumps users.current_balance.
+    """
+    def __init__(self, sb: Client, dry_run: bool = False):
+        self.sb = sb
+        self.dry_run = dry_run
 
-        # (4) Cluster Penalty Escalator over full window
-        cp_mult, cp_det = _cluster_penalty(sb, vid, start, end)
-        vu *= cp_mult
+    # ---------- compute units for a day (no DB writes) ----------
+    def compute_units(self, run_day: date) -> Dict[int, float]:
+        videos = load_videos(self.sb)
+        day_events = load_events_for_day(self.sb, run_day)
+        if not day_events:
+            return {}
 
-        v_metrics.append(
-            {
-                "video_id": vid,
-                "creator_id": cid,
-                "eng_units": eng,
-                "eis_avg": eis_avg,
-                "vu": vu,
-                "meta": {
-                    "velocity": fv,
-                    "cluster_penalty": cp_det | {"multiplier": cp_mult},
-                    "velocity_kicker": velocity_kicker,
-                },
-            }
-        )
+        # Aggregate per video for the day
+        per_video_events: Dict[int, List[dict]] = defaultdict(list)
+        for e in day_events:
+            vid = e.get("video_id")
+            if vid is not None:
+                per_video_events[vid].append(e)
 
-    # If nothing eligible, record an empty window and exit
-    if not v_metrics:
-        win = (
-            sb.table("revenue_windows")
-            .insert(
-                {
-                    "window_start": start.isoformat(),
-                    "window_end": end.isoformat(),
-                    "gross_revenue_cents": R_gross,
-                    "taxes_cents": taxes,
-                    "app_store_fees_cents": store,
-                    "refunds_cents": refunds,
-                    "pool_pct": pool_pct,
-                    "margin_target": margin_target,
-                    "risk_reserve_pct": risk_reserve_pct,
-                    "platform_fee_pct": platform_fee_pct,
-                    "costs_est_cents": costs_est_cents,
-                    "creator_pool_cents": 0,
-                    "meta": {"note": "no eligible videos"},
-                }
+        # Engagement rates for quality z
+        eng_rates: List[float] = []
+        per_video_stats: Dict[int, dict] = {}
+        for vid, evs in per_video_events.items():
+            c = Counter(e["event_type"] for e in evs)
+            views = c.get("view", 0)
+            likes = c.get("like", 0)
+            comments = c.get("comment", 0)
+            shares = c.get("share", 0)
+            er = 0.0 if views == 0 else (likes + comments + shares) / views
+            eng_rates.append(er)
+            per_video_stats[vid] = {"views": views, "likes": likes, "comments": comments, "shares": shares, "eng_rate": er}
+
+        mu = sum(eng_rates) / len(eng_rates) if eng_rates else 0.0
+        sigma = math.sqrt(sum((x - mu) ** 2 for x in eng_rates) / (len(eng_rates) - 1)) if len(eng_rates) > 1 else 0.0
+
+        # Per-creator raw units (after per-video multipliers)
+        per_creator_units: Dict[int, float] = defaultdict(float)
+        for vid, stats in per_video_stats.items():
+            vrow = videos.get(vid)
+            if not vrow:
+                continue
+            cid = vrow["creator_id"]
+            raw_units = (
+                EVENT_WEIGHTS["view"]    * stats["views"] +
+                EVENT_WEIGHTS["like"]    * stats["likes"] +
+                EVENT_WEIGHTS["comment"] * stats["comments"] +
+                EVENT_WEIGHTS["share"]   * stats["shares"]
             )
-            .execute()
-            .data
-            or [None]
-        )[0]
-        return {"revenue_window": win, "video_rev_shares": [], "creator_payouts": []}
+            q_mult = quality_multiplier(stats["eng_rate"], mu, sigma)
+            ev_mult = early_kicker_mult_for_video(self.sb, vrow)
+            cl_mult = cluster_penalty_mult(per_video_events[vid])
+            per_creator_units[cid] += raw_units * q_mult * ev_mult * cl_mult
 
-    # (1) Quality-Indexed Pool: ±2% by window avg EIS, bounded by margin guardrail
-    # weight EIS by EngUnits to reflect volume+quality
-    total_eng = sum(vm["eng_units"] for vm in v_metrics) or 1
-    avg_eis_platform = sum(vm["eis_avg"] * (vm["eng_units"] / total_eng) for vm in v_metrics)
-    q_adj = clip((avg_eis_platform - 60.0) / 400.0, -0.02, +0.02)  # ±2%
-    CreatorPool = min(pool_max_by_margin, int(CreatorPool * (1.0 + q_adj)))
+        if not per_creator_units:
+            return {}
 
-    # Insert revenue_window
-    win = (
-        sb.table("revenue_windows")
-        .insert(
+        # Integrity multiplier (7d window ending run_day)
+        eis_start = datetime.combine(run_day, datetime.min.time(), tzinfo=timezone.utc) - timedelta(days=7)
+        eis_end   = datetime.combine(run_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        events_7d = load_events_between(self.sb, eis_start, eis_end)
+
+        # Build creator stats for 7d
+        creator_7d: Dict[int, dict] = defaultdict(lambda: {"views":0,"likes":0,"comments":0,"devs":set(),"ips":set()})
+        video_to_creator = {vid: v["creator_id"] for vid, v in videos.items()}
+
+        for e in events_7d:
+            vid = e.get("video_id")
+            if vid not in video_to_creator:
+                continue
+            cid = video_to_creator[vid]
+            et  = e.get("event_type")
+            if et == "view":    creator_7d[cid]["views"] += 1
+            elif et == "like":  creator_7d[cid]["likes"] += 1
+            elif et == "comment": creator_7d[cid]["comments"] += 1
+            if e.get("device_id") is not None: creator_7d[cid]["devs"].add(e["device_id"])
+            if e.get("ip_hash") is not None:   creator_7d[cid]["ips"].add(e["ip_hash"])
+
+        # Apply integrity multiplier
+        units_after_integrity: Dict[int, float] = {}
+        for cid, units in per_creator_units.items():
+            s = creator_7d.get(cid, {"views":0,"likes":0,"comments":0,"devs":set(),"ips":set()})
+            integ = integrity_multiplier_7d(
+                views=s["views"],
+                uniq_dev=len(s["devs"]),
+                uniq_ip=len(s["ips"]),
+                likes=s["likes"],
+                comments=s["comments"]
+            )
+            units_after_integrity[cid] = units * integ
+
+        return units_after_integrity
+
+    # ---------- scale units to pool and (optionally) write ----------
+    def run(self, pool_cents: int, run_day: Optional[date] = None, payment_type: str = "revenue_split") -> List[dict]:
+        run_day = run_day or datetime.now(timezone.utc).date()
+
+        units = self.compute_units(run_day)
+        total_units = sum(units.values())
+        if total_units <= 0:
+            raise RuntimeError(f"No eligible units for {run_day}.")
+
+        # Scale once; round to cents
+        allocations: Dict[int, int] = {
+            cid: int(round(pool_cents * (u / total_units)))
+            for cid, u in units.items()
+            if u > 0
+        }
+        breakdown = [{"creator_id": cid, "amount_cents": amt} for cid, amt in sorted(allocations.items(), key=lambda x: x[1], reverse=True)]
+
+        if self.dry_run:
+            return breakdown
+
+        # Write transactions (+inflow) and update balances
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Insert in chunks
+        rows = [
             {
-                "window_start": start.isoformat(),
-                "window_end": end.isoformat(),
-                "gross_revenue_cents": R_gross,
-                "taxes_cents": taxes,
-                "app_store_fees_cents": store,
-                "refunds_cents": refunds,
-                "pool_pct": pool_pct,
-                "margin_target": margin_target,
-                "risk_reserve_pct": risk_reserve_pct,
-                "platform_fee_pct": platform_fee_pct,
-                "costs_est_cents": costs_est_cents,
-                "creator_pool_cents": CreatorPool,
-                "meta": {"avg_eis_platform": avg_eis_platform, "q_adj": q_adj},
+                "created_at": now_iso,
+                "recipient": cid,
+                "amount_cents": amt,
+                "status": "pending",
+                "payment_type": payment_type,  # daily or monthly caller decides
+                "direction": "inflow",         # <-- NEW: enum
             }
-        )
-        .execute()
-        .data
-        or [None]
-    )[0]
-    win_id = int(win["id"])
+            for cid, amt in allocations.items()
+            if amt > 0
+        ]
 
-    # Normalize VU -> shares within CreatorPool
-    vu_total = sum(vm["vu"] for vm in v_metrics) or 1.0
-    vrs_rows = []
-    alloc_by_creator: Dict[int, int] = {}
-    for vm in v_metrics:
-        share = float(vm["vu"] / vu_total)
-        alloc = int(share * CreatorPool)
-        vrs_rows.append(
-            {
-                "revenue_window_id": win_id,
-                "video_id": vm["video_id"],
-                "eng_units": vm["eng_units"],
-                "eis_avg": vm["eis_avg"],
-                "vu": vm["vu"],
-                "share_pct": share,
-                "allocated_cents": alloc,
-                "meta": vm["meta"],
-            }
-        )
-        alloc_by_creator[vm["creator_id"]] = alloc_by_creator.get(vm["creator_id"], 0) + alloc
+        CHUNK = 1000
+        for i in range(0, len(rows), CHUNK):
+            self.sb.table("transactions").insert(rows[i:i+CHUNK]).execute()
 
-    if vrs_rows:
-        sb.table("video_rev_shares").insert(vrs_rows).execute()
+        # Update balances
+        for cid, amt in allocations.items():
+            cur = self.sb.table("users").select("current_balance").eq("id", cid).limit(1).execute().data
+            curbal = (cur[0]["current_balance"] if cur else 0) or 0
+            self.sb.table("users").update({"current_balance": curbal + amt}).eq("id", cid).execute()
 
-    # (2) Integrity Streak Bonus at creator level (±3%), then re-normalize to pool
-    now = datetime.now(UTC)
-    bonuses: Dict[int, float] = {}
-    pre_sum = sum(alloc_by_creator.values()) or 1
-    # apply ±3% by 7-day avg EIS
-    for cid, alloc in alloc_by_creator.items():
-        e7 = _creator_7d_avg_eis(sb, cid, now)
-        mult = 1.03 if e7 >= 70.0 else (0.97 if e7 <= 40.0 else 1.00)
-        bonuses[cid] = mult
-    # scale creator allocations by multiplier
-    scaled = {cid: int(alloc_by_creator[cid] * bonuses[cid]) for cid in alloc_by_creator}
-    scaled_sum = sum(scaled.values()) or 1
-    # re-normalize to CreatorPool to preserve margin
-    factor = CreatorPool / scaled_sum
-    for cid in scaled:
-        scaled[cid] = int(scaled[cid] * factor)
+        return breakdown
 
-    # Write creator payouts/reserves to transactions (schema: recipient, amount_cents, status, payment_type)
-    payouts = []
-    for cid, alloc_c in scaled.items():
-        platform_fee = int(platform_fee_pct * alloc_c)
-        reserve = int(risk_reserve_pct * alloc_c)
-        pay_now = alloc_c - platform_fee - reserve
-        if pay_now < min_payout_cents:
-            reserve += pay_now
-            pay_now = 0
-        if pay_now > 0:
-            sb.table("transactions").insert(
-                {
-                    "recipient": cid,
-                    "payment_type": "payout",
-                    "amount_cents": pay_now,
-                    "status": "pending",
-                }
-            ).execute()
-        if reserve > 0:
-            sb.table("transactions").insert(
-                {
-                    "recipient": cid,
-                    "payment_type": "reserve",
-                    "amount_cents": reserve,
-                    "status": "on_hold",
-                }
-            ).execute()
-        payouts.append(
-            {
-                "creator_id": cid,
-                "alloc_cents": alloc_c,
-                "pay_now_cents": pay_now,
-                "platform_fee_cents": platform_fee,
-                "reserve_cents": reserve,
-                "bonus_mult": bonuses[cid],
-            }
-        )
 
-    return {"revenue_window": win, "video_rev_shares": vrs_rows, "creator_payouts": payouts}
