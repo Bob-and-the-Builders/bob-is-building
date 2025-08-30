@@ -1,3 +1,4 @@
+# revenue_split/revenue_split_monthly_legacy.py
 from __future__ import annotations
 import os
 import sys
@@ -51,7 +52,7 @@ def already_paid_for_month(sb, year: int, month: int) -> bool:
 
 
 def main():
-    print("[start] revenue_split_monthly (integrated)", flush=True)
+    print("[start] revenue_split_monthly", flush=True)
     pool_cents = int(os.getenv("POOL_CENTS", "10000000"))
     dry_run = _parse_bool(os.getenv("DRY_RUN", "true"))
     verbose = _parse_bool(os.getenv("VERBOSE", "1"))
@@ -146,4 +147,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
