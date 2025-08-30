@@ -1,12 +1,15 @@
-import random
+import os
 import re
 import datetime
-import string
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import phonenumbers
+import supabase
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class KYCStatus(Enum):
     PENDING = "pending"
@@ -27,6 +30,7 @@ class KYCLevel(Enum):
 
 @dataclass
 class PersonalInfo:
+    id: int
     first_name: str
     last_name: str
     date_of_birth: str  # DD-MM-YYYY format
@@ -36,13 +40,16 @@ class PersonalInfo:
     email: str
 
 @dataclass
-class Document:
+class DocumentInfo:
+    document_id: int
+    full_name: str
     document_type: DocumentType
     document_number: str
-    full_name: str
     issued_date: str
     expiry_date: str
+    user_id: int
     issuing_country: str
+    submit_date: str
 
 @dataclass
 class KYCResult:
@@ -58,7 +65,7 @@ class KYCChecker:
         self.pep_list = self._load_pep_list()
         self.blacklisted_countries = {'Country ABC', 'Country XYZ'}  # Example countries
         
-    def verify_user(self, personal_info: PersonalInfo, documents: List[Document]) -> KYCResult:
+    def verify_user(self, personal_info: PersonalInfo, documents: List[DocumentInfo]) -> KYCResult:
         """
         Main KYC verification function
         """
@@ -125,7 +132,7 @@ class KYCChecker:
         
         return flags, score_deduction
     
-    def _validate_documents(self, documents: List[Document]) -> Tuple[List[str], float]:
+    def _validate_documents(self, documents: List[DocumentInfo]) -> Tuple[List[str], float]:
         """Validate submitted documents"""
         flags = []
         score_deduction = 0
@@ -215,7 +222,7 @@ class KYCChecker:
     def _is_valid_date_of_birth(self, date_str: str) -> bool:
         """Validate date of birth format and reasonableness"""
         try:
-            birth_date = datetime.datetime.strptime(date_str, "%d-%m-%Y")
+            birth_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
             today = datetime.datetime.now()
             age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
             return 0 <= age <= 120
@@ -229,7 +236,7 @@ class KYCChecker:
     def _calculate_age(self, date_of_birth: str) -> int:
         """Calculate age from date of birth"""
         try:
-            birth_date = datetime.datetime.strptime(date_of_birth, "%d-%m-%Y")
+            birth_date = datetime.datetime.strptime(date_of_birth, "%Y-%m-%d")
             today = datetime.datetime.now()
             return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
         except ValueError:
@@ -238,7 +245,7 @@ class KYCChecker:
     def _is_document_outdated(self, issued_date: str) -> bool:
         """Check if document is outdated (issued more than 5 years ago)"""
         try:
-            issued = datetime.datetime.strptime(issued_date, "%d-%m-%Y")
+            issued = datetime.datetime.strptime(issued_date, "%Y-%m-%d")
             return (datetime.datetime.now() - issued).days > 5 * 365
         except ValueError:
             return False
@@ -246,7 +253,7 @@ class KYCChecker:
     def _is_document_expired(self, expiry_date: str) -> bool:
         """Check if document is expired"""
         try:
-            expiry = datetime.datetime.strptime(expiry_date, "%d-%m-%Y")
+            expiry = datetime.datetime.strptime(expiry_date, "%Y-%m-%d")
             return expiry < datetime.datetime.now()
         except ValueError:
             return True  # Assume expired if date format is invalid
@@ -278,27 +285,16 @@ class KYCChecker:
             "senior executive"
         }
 
-# Usage example and helper functions
 class KYCManager:
     def __init__(self):
         self.checker = KYCChecker()
-        self.results_storage = {}  # In production, use a proper database
     
-    def process_kyc_application(self, user_id: str, personal_info: PersonalInfo, 
-                              documents: List[Document]) -> str:
+    def process_kyc_application(self, personal_info: PersonalInfo, 
+                              documents: List[DocumentInfo]) -> str:
         """Process a KYC application and return application ID"""
         result = self.checker.verify_user(personal_info, documents)
-        
-        application_id = self._generate_application_id(user_id)
-        self.results_storage[application_id] = {
-            'user_id': user_id,
-            'personal_info': personal_info,
-            'documents': documents,
-            'result': result
-        }
-        
-        return application_id
-    
+        return result
+
     def get_kyc_status(self, application_id: str) -> Optional[KYCResult]:
         """Get KYC status by application ID"""
         if application_id in self.results_storage:
@@ -311,39 +307,81 @@ class KYCManager:
         hash_input = f"{user_id}_{timestamp}"
         return hashlib.md5(hash_input.encode()).hexdigest()[:12]
 
+def get_user_info(supabase_client, user_id: int) -> PersonalInfo:
+    """Retrieve user information"""
+    response = supabase_client.table("users").select("*").eq("id", user_id).execute()
+    user_data = response.get("data", [])[0]
+    if not user_data:
+        raise ValueError("User not found")
+
+    return PersonalInfo(
+        first_name=user_data.get("first_name"),
+        last_name=user_data.get("last_name"),
+        date_of_birth=user_data.get("date_of_birth"),
+        nationality=user_data.get("nationality"),
+        address=user_data.get("address"),
+        phone=user_data.get("phone"),
+        email=user_data.get("email")
+    )
+
+def get_user_documents(supabase_client, user_id: int) -> List[DocumentInfo]:
+    """Retrieve user documents"""
+    response = supabase_client.table("documents").select("*").eq("user_id", user_id).execute()
+    documents_data = response.get("data", [])
+    return [
+        DocumentInfo(
+            document_id=doc.get("id"),
+            full_name=doc.get("full_name"),
+            document_type=DocumentType[doc.get("document_type").upper()],
+            document_number=doc.get("document_number"),
+            issued_date=doc.get("issued_date"),
+            expiry_date=doc.get("expiry_date"),
+            user_id=doc.get("user_id"),
+            issuing_country=doc.get("issuing_country"),
+            submit_date=doc.get("submit_date")
+        )
+        for doc in documents_data
+    ]
+
+def update_database(supabase_client, user_id: int, kyc_result: KYCResult) -> None:
+    """Update KYC result in the database"""
+    response = (
+        supabase_client.table("users")
+        .update({"kyc_level": kyc_result.kyc_level.value})
+        .eq("id", user_id)
+        .execute()
+    )
+    print("Update Database Response:", response)
+
+def submit_kyc_application(user_id: int) -> None:
+    """Submit a KYC application"""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL or API key in environment")
+    supabase_client = supabase.create_client(url, key)
+    user_info = get_user_info(supabase_client, user_id)
+    documents = get_user_documents(supabase_client, user_info.id)
+    results = kyc_manager.process_kyc_application(user_info, documents)
+    update_database(supabase_client, user_id, results)
+
 # Example usage
 if __name__ == "__main__":
     # Create KYC manager
     kyc_manager = KYCManager()
 
-    # Random user data
     # To randomise: first_name, last_name, date_of_birth, nationality, address, phone, email
     user_info = PersonalInfo(
         first_name="John",
         last_name="Doe",
-        date_of_birth="01-01-1990",
+        date_of_birth="1990-01-01",
         nationality="Singapore",
         address="Kent Ridge Avenue 1, Singapore",
         phone="+6512345678",
         email="john.doe@example.com"
     )
-    
-    # Sample documents
-    NUM_DOCUMENTS = 3
-    document_list = list(DocumentType)
-    documents = []
 
-    for i in range(NUM_DOCUMENTS):
-        documents.append(
-            Document(
-                document_type=document_list[i],
-                document_number=f"{random.choice(['S', 'T'])}{''.join(random.choices(string.digits, k=8))}{random.choice(string.ascii_uppercase)}",
-                full_name=user_info.first_name + " " + user_info.last_name,
-                issued_date=random.choice(["01-01-2017", "15-06-2021", "30-09-2023"]),
-                expiry_date=random.choice(["01-01-2024", "15-06-2025", "30-09-2026"]),
-                issuing_country="Singapore"
-            )
-        )
+    documents = { }
 
     print(10*"-"+"User Info"+10*"-")
     print(f" - Name: {user_info.first_name} {user_info.last_name}")

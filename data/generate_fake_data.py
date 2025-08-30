@@ -9,7 +9,6 @@ from typing import List, Dict, Any, Optional
 from faker import Faker
 from dotenv import load_dotenv
 
-
 """
 Fake data generator for the TechJam ERD while preserving foreign keys.
 
@@ -46,6 +45,18 @@ load_dotenv()
 # -----------------------
 # Data model containers
 # -----------------------
+
+@dataclass
+class Document:
+    id: int
+    full_name: str
+    document_type: str
+    document_number: str
+    issued_date: str
+    expiry_date: str
+    issuing_country: str
+    user_id: int
+    submit_date: str
 
 @dataclass
 class User:
@@ -148,6 +159,36 @@ def gen_users(n_users: int, creator_ratio: float = 0.35) -> List[User]:
             )
         )
     return users
+
+
+def gen_documents(users: List[UserInfo], min_per_user=1, max_per_user=3) -> List[Document]:
+    docs: List[Document] = []
+    doc_id = 1
+    for u in users:
+        count = random.randint(min_per_user, max_per_user)
+        for _ in range(count):
+            issued_date = fake.date_this_decade()
+            
+            # Use timedelta to avoid leap year issues entirely
+            years_to_add = random.randint(3, 10)
+            days_to_add = years_to_add * 365 + (years_to_add // 4)  # Approximate leap years
+            expiry_date = issued_date + timedelta(days=days_to_add)
+            
+            docs.append(
+                Document(
+                    id=doc_id,
+                    full_name=u.first_name + " " + u.last_name,
+                    document_type=random.choice(["passport", "drivers_license", "national_id"]),
+                    document_number=fake.bothify(text='??######'),
+                    issued_date=issued_date.isoformat(),
+                    expiry_date=expiry_date.isoformat(),
+                    user_id=u.user_id,
+                    issuing_country=fake.country(),
+                    submit_date=datetime.now().isoformat()
+                )
+            )
+            doc_id += 1
+    return docs
 
 
 def gen_user_info(users: List[User], reserved_emails: Optional[List[str]] = None) -> List[UserInfo]:
@@ -320,6 +361,7 @@ def insert_supabase_all(
     videos: List[Video],
     events: List[Event],
     txs: List[Transaction],
+    documents: List[Document],
 ):
     if create_client is None:
         raise RuntimeError("supabase package not available. Install and try again.")
@@ -346,6 +388,10 @@ def insert_supabase_all(
             client.table("users").update({"user_info_id": u.user_info_id}).eq("id", u.id).execute()
     except Exception:
         pass
+
+    # Insert documents
+    for chunk in batch(asdict_list(documents), size=500):
+        client.table("documents").insert(chunk).execute()
 
     # Insert videos
     for chunk in batch(asdict_list(videos), size=500):
@@ -411,6 +457,7 @@ def main():
     videos = gen_videos(users, args.min_videos, args.max_videos)
     events = gen_events(users, videos, args.min_events, args.max_events)
     txs = gen_transactions(users, args.min_tx, args.max_tx)
+    docs = gen_documents(users.id)
 
     # Write JSON snapshots (offline artifacts)
     write_json("data/users.json", asdict_list(users))
@@ -418,17 +465,18 @@ def main():
     write_json("data/videos.json", asdict_list(videos))
     write_json("data/events.json", asdict_list(events))
     write_json("data/transactions.json", asdict_list(txs))
+    write_json("data/documents.json", asdict_list(docs))
 
     print(
         f"Generated: users={len(users)}, creators={sum(1 for u in users if u.is_creator)}, "
-        f"videos={len(videos)}, events={len(events)}, transactions={len(txs)}"
+        f"videos={len(videos)}, events={len(events)}, transactions={len(txs)}, documents={len(docs)}"
     )
     if args.emails:
         for i, e in enumerate(args.emails[: len(users)]):
             print(f"Seeded user id={users[i].id} email={e}")
 
     if args.insert:
-        insert_supabase_all(users, infos, videos, events, txs)
+        insert_supabase_all(users, infos, videos, events, txs, docs)
         print("Inserted into Supabase successfully.")
 
 
