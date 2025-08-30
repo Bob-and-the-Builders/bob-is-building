@@ -190,6 +190,30 @@ def gen_documents(users: List[UserInfo], min_per_user=1, max_per_user=3) -> List
             doc_id += 1
     return docs
 
+def generate_valid_phone_number() -> str:
+    """Generate a valid phone number in E.164 format"""
+    # Common country codes and their typical formats
+    country_formats = [
+        ("US", "+1", 10),      # United States: +1 followed by 10 digits
+        ("GB", "+44", 10),     # United Kingdom: +44 followed by 10 digits  
+        ("SG", "+65", 8),      # Singapore: +65 followed by 8 digits
+        ("AU", "+61", 9),      # Australia: +61 followed by 9 digits
+        ("CA", "+1", 10),      # Canada: +1 followed by 10 digits
+        ("DE", "+49", 11),     # Germany: +49 followed by 11 digits
+        ("FR", "+33", 9),      # France: +33 followed by 9 digits
+        ("JP", "+81", 10),     # Japan: +81 followed by 10 digits
+    ]
+    
+    _, prefix, digits = random.choice(country_formats)
+    
+    # Generate random digits
+    number_part = ''.join([str(random.randint(0, 9)) for _ in range(digits)])
+    
+    # Ensure it doesn't start with 0 for most countries
+    if number_part[0] == '0':
+        number_part = str(random.randint(1, 9)) + number_part[1:]
+    
+    return f"{prefix}{number_part}"
 
 def gen_user_info(users: List[User], reserved_emails: Optional[List[str]] = None) -> List[UserInfo]:
     infos: List[UserInfo] = []
@@ -214,7 +238,7 @@ def gen_user_info(users: List[User], reserved_emails: Optional[List[str]] = None
             date_of_birth=str(dob),
             nationality=fake.country(),
             address=fake.address().replace("\n", ", "),
-            phone=fake.phone_number(),
+            phone=generate_valid_phone_number(),
             email=email,
             user_id=u.id,
         )
@@ -375,11 +399,11 @@ def insert_supabase_all(
 
     # Insert users first
     for chunk in batch(asdict_list(users), size=500):
-        client.table("users").insert(chunk).execute()
+        client.table("users").upsert(chunk).execute()
 
     # Insert user_info next
     for chunk in batch(asdict_list(infos), size=500):
-        client.table("user_info").insert(chunk).execute()
+        client.table("user_info").upsert(chunk).execute()
 
     # Optional: backfill users.user_info_id if your schema expects it
     # Not all deployments enforce this FK, but we set it if present.
@@ -391,19 +415,19 @@ def insert_supabase_all(
 
     # Insert documents
     for chunk in batch(asdict_list(documents), size=500):
-        client.table("documents").insert(chunk).execute()
+        client.table("documents").upsert(chunk).execute()
 
     # Insert videos
     for chunk in batch(asdict_list(videos), size=500):
-        client.table("videos").insert(chunk).execute()
+        client.table("videos").upsert(chunk).execute()
 
     # Insert events (can be large)
     for chunk in batch(asdict_list(events), size=1000):
-        client.table("event").insert(chunk).execute()
+        client.table("event").upsert(chunk).execute()
 
     # Insert transactions
     for chunk in batch(asdict_list(txs), size=500):
-        client.table("transactions").insert(chunk).execute()
+        client.table("transactions").upsert(chunk).execute()
 
 
 # -----------------------
@@ -457,7 +481,7 @@ def main():
     videos = gen_videos(users, args.min_videos, args.max_videos)
     events = gen_events(users, videos, args.min_events, args.max_events)
     txs = gen_transactions(users, args.min_tx, args.max_tx)
-    docs = gen_documents(users.id)
+    docs = gen_documents(infos)
 
     # Write JSON snapshots (offline artifacts)
     write_json("data/users.json", asdict_list(users))

@@ -4,7 +4,6 @@ import requests
 import random
 import time
 import hashlib
-import logging
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -14,17 +13,13 @@ load_dotenv()
 
 ABSTRACT_API_KEY = os.getenv("ABSTRACT_API_KEY")
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 class TrustLevel(Enum):
     """Trust levels for phone numbers"""
-    VERY_LOW = "very_low"    # 0-19: Likely fraudulent
-    LOW = "low"              # 20-39: High risk
-    MEDIUM = "medium"        # 40-59: Moderate risk
-    HIGH = "high"            # 60-79: Low risk
-    VERY_HIGH = "very_high"  # 80-100: Very low risk
+    VERY_LOW = 0         # 0-19: Likely fraudulent
+    LOW = 1              # 20-39: High risk
+    MEDIUM = 2           # 40-59: Moderate risk
+    HIGH = 3             # 60-79: Low risk
+    VERY_HIGH = 4        # 80-100: Very low risk
 
 class PhoneTypeRisk:
     PHONE_TYPE_RISK = {
@@ -66,7 +61,6 @@ class DeviceInfo:
     device_id: str
     device_type: str  # android, ios, others
     ip_address: str
-    geolocation: Dict[str, float]  # lat, lng
     is_rooted: bool = False
     is_emulator: bool = False
 
@@ -101,10 +95,7 @@ class PhoneTrustScore:
 
     def calculate_trust_score(self, 
                              phone_number: str,
-                             date: str,
-                             metadata: Optional[PhoneMetadata] = None,
-                             device_info: Optional[DeviceInfo] = None,
-                             activity: Optional[PhoneActivity] = None) -> TrustScoreResult:
+                             date: str) -> TrustScoreResult:
         """
         Calculate a trust score for a phone number
         
@@ -128,18 +119,18 @@ class PhoneTrustScore:
         sub_scores = {}
         risk_factors = []
         
-        # Calculate metadata-based score (0-30)
-        metadata_score, metadata_risks = self._calculate_metadata_score(phone_number, metadata)
+        # Calculate metadata-based score
+        metadata_score, metadata_risks = self._calculate_metadata_score(phone_number)
         sub_scores["metadata"] = metadata_score
         risk_factors.extend(metadata_risks)
         
-        # Calculate device-based score (0-20)
-        device_score, device_risks = self._calculate_device_score(phone_number, device_info)
+        # Calculate device-based score
+        device_score, device_risks = self._calculate_device_score(phone_number)
         sub_scores["device"] = device_score
         risk_factors.extend(device_risks)
         
-        # Calculate activity-based score (0-30)
-        activity_score, activity_risks = self._calculate_activity_score(phone_number, activity)
+        # Calculate activity-based score
+        activity_score, activity_risks = self._calculate_activity_score(phone_number)
         sub_scores["activity"] = activity_score
         risk_factors.extend(activity_risks)
         
@@ -168,28 +159,25 @@ class PhoneTrustScore:
         # Cache the result
         self.score_cache[cache_key] = result
 
-        logger.info(f"Trust score for {phone_number}: {overall_score} ({trust_level.value})")
-        logger.info(f"calculation time: {time.time() - start_time:.2f}s")
+        print(f"Trust score for {phone_number}: {overall_score} ({trust_level.value})")
+        print(f"calculation time: {time.time() - start_time:.2f}s")
 
         return result
 
     def _calculate_metadata_score(self, 
-                                 phone_number: str, 
-                                 metadata: Optional[PhoneMetadata]) -> Tuple[int, List[str]]:
+                                 phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on phone metadata
         Returns a score from 0-30 and a list of risk factors
         """
         risks = []
         
-        # If no metadata provided, return simulated data for demo purposes
-        if metadata is None:
-            url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={phone_number}"
-            response = requests.get(url)
-            if response.status_code == 200:
-                metadata = PhoneMetadata(**response.json())
-            else:
-                metadata = self._simulate_metadata(phone_number)
+        url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={phone_number}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            metadata = PhoneMetadata(**response.json())
+        else:
+            metadata = self._simulate_metadata(phone_number)
 
         score = 35
 
@@ -203,8 +191,7 @@ class PhoneTrustScore:
         return max(0, score), risks
 
     def _calculate_device_score(self, 
-                               phone_number: str, 
-                               device_info: Optional[DeviceInfo]) -> Tuple[int, List[str]]:
+                               phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on device information
         Returns a score from 0-20 and a list of risk factors
@@ -226,8 +213,7 @@ class PhoneTrustScore:
             risks.append("Rooted/jailbroken device")
             
         # Check for IP mismatches with phone country
-        # This would require resolving IP geolocation - simplified for demo
-        if device_info.geolocation:
+        if device_info.ip_address:
             # Check if IP is from expected region for phone number
             ip_country_mismatch = random.choice([True, False, False, False])
             if ip_country_mismatch:
@@ -237,8 +223,7 @@ class PhoneTrustScore:
         return max(0, score), risks
 
     def _calculate_activity_score(self, 
-                                 phone_number: str, 
-                                 activity: Optional[PhoneActivity]) -> Tuple[int, List[str]]:
+                                 phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on phone activity patterns
         Returns a score from 0-30 and a list of risk factors
@@ -289,7 +274,8 @@ class PhoneTrustScore:
                            date: str) -> str:
         """Generate a cache key for a specific request"""
         # Create a simple hash of inputs
-        input_data = f"{phone_number}|{date}"
+        date_obj = datetime.fromisoformat(date)
+        input_data = f"{phone_number}|{date_obj.month}"
         return hashlib.md5(input_data.encode()).hexdigest()
         
     # Simulation methods for demo purposes
@@ -348,11 +334,7 @@ class PhoneTrustScore:
         
         # Generate IP (simplified)
         ip = f"{phone_hash % 256}.{(phone_hash // 256) % 256}.{(phone_hash // 65536) % 256}.{(phone_hash // 16777216) % 256}"
-        
-        # Generate geolocation (simplified)
-        lat = (phone_hash % 180) - 90  # -90 to 90
-        lng = (phone_hash % 360) - 180  # -180 to 180
-        
+                
         # Risk factors
         is_emulator = (phone_hash % 100) < 5  # 5% chance
         is_rooted = (phone_hash % 100) < 10  # 10% chance
@@ -361,7 +343,6 @@ class PhoneTrustScore:
             device_id=device_id,
             device_type=random.choices(device_types, weights=device_type_weights)[0],
             ip_address=ip,
-            geolocation={"lat": lat, "lng": lng},
             is_emulator=is_emulator,
             is_rooted=is_rooted
         )
@@ -445,14 +426,20 @@ class PhoneTrustScore:
     def _load_high_risk_countries(self):
         return {"234", "84", "62", "63"}
 
-if __name__ == "__main__":
+def get_trust_score(phone_number: str) -> float:
     trust_scorer = PhoneTrustScore()
-    # Test with sample numbers
-    test_numbers = ["+445544332211", "+6590123456"]
+    result = trust_scorer.calculate_trust_score(phone_number, datetime.now().strftime("%Y-%m-%d"))
+    return result.overall_score
+
+if __name__ == "__main__":
+    get_trust_score("+445544332211")
+    # trust_scorer = PhoneTrustScore()
+    # # Test with sample numbers
+    # test_numbers = ["+445544332211", "+6590123456"]
     
-    for phone in test_numbers:
-        print(f"Analyzing {phone}:")
-        result = trust_scorer.calculate_trust_score(phone, datetime.now().strftime("%d-%m-%Y"))
-        print(f"Trust Score: {result.overall_score}/100")
-        print(f"Trust Level: {result.trust_level.value}")
-        print(f"Risk factors: {result.risk_factors}\n")
+    # for phone in test_numbers:
+    #     print(f"Analyzing {phone}:")
+    #     result = trust_scorer.calculate_trust_score(phone, datetime.now().strftime("%d-%m-%Y"))
+    #     print(f"Trust Score: {result.overall_score}/100")
+    #     print(f"Trust Level: {result.trust_level.value}")
+    #     print(f"Risk factors: {result.risk_factors}\n")
