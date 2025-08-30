@@ -8,7 +8,7 @@ from supabase import Client
 # Optional: moviepy for metadata extraction
 from moviepy import VideoFileClip
 
-st.set_page_config(page_title="Upload Video", page_icon="📹")
+st.set_page_config(page_title="Upload Video")
 
 supabase: Client = st.session_state.get("supabase")
 
