@@ -399,11 +399,11 @@ def insert_supabase_all(
 
     # Insert users first
     for chunk in batch(asdict_list(users), size=500):
-        client.table("users").upsert(chunk).execute()
+        client.table("users").insert(chunk).execute()
 
     # Insert user_info next
     for chunk in batch(asdict_list(infos), size=500):
-        client.table("user_info").upsert(chunk).execute()
+        client.table("user_info").insert(chunk).execute()
 
     # Optional: backfill users.user_info_id if your schema expects it
     # Not all deployments enforce this FK, but we set it if present.
@@ -415,19 +415,19 @@ def insert_supabase_all(
 
     # Insert documents
     for chunk in batch(asdict_list(documents), size=500):
-        client.table("documents").upsert(chunk).execute()
+        client.table("documents").insert(chunk).execute()
 
     # Insert videos
     for chunk in batch(asdict_list(videos), size=500):
-        client.table("videos").upsert(chunk).execute()
+        client.table("videos").insert(chunk).execute()
 
     # Insert events (can be large)
     for chunk in batch(asdict_list(events), size=1000):
-        client.table("event").upsert(chunk).execute()
+        client.table("event").insert(chunk).execute()
 
     # Insert transactions
     for chunk in batch(asdict_list(txs), size=500):
-        client.table("transactions").upsert(chunk).execute()
+        client.table("transactions").insert(chunk).execute()
 
 
 # -----------------------

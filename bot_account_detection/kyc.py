@@ -23,10 +23,10 @@ class DocumentType(Enum):
     NATIONAL_ID = "national_id"
 
 class KYCLevel(Enum):
-    LOW_RISK = 1
+    LOW_RISK = 3
     MEDIUM_RISK = 2
-    HIGH_RISK = 3
-    CRITICAL_RISK = 4
+    HIGH_RISK = 1
+    CRITICAL_RISK = 0
 
 @dataclass
 class PersonalInfo:

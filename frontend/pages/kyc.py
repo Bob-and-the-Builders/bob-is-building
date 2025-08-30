@@ -8,11 +8,7 @@ import json
 # Add the bot_account_detection directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../bot_account_detection'))
 
-from kyc import (
-    KYCChecker, KYCManager, PersonalInfo, Document, DocumentType, 
-    KYCStatus, KYCLevel, KYCResult
-)
-from trust_score import PhoneTrustScore, TrustLevel
+from bot_account_detection import KYCManager, PersonalInfo, DocumentInfo, KYCResult, KYCStatus, KYCLevel, DocumentType, PhoneTrustScore, TrustLevel
 
 def initialize_session_state():
     """Initialize session state variables"""
@@ -318,7 +314,7 @@ def main():
                         document_objects = []
                         for doc in documents:
                             if doc['document_type']:  # Only process if document type is selected
-                                document_objects.append(Document(
+                                document_objects.append(DocumentInfo(
                                     document_type=DocumentType(doc['document_type']),
                                     document_number=doc['document_number'],
                                     full_name=doc['full_name'],

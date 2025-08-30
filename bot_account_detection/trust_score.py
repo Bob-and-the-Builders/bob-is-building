@@ -8,6 +8,7 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Any
 from datetime import datetime, timedelta
+import supabase
     
 load_dotenv()
 
@@ -88,8 +89,6 @@ class PhoneTrustScore:
     Higher scores indicate higher trustworthiness.
     """
     def __init__(self):
-        self.high_risk_countries = self._load_high_risk_countries()  # Example country codes with higher fraud rates
-        
         # Cache for previously calculated scores
         self.score_cache = {}
 
@@ -168,7 +167,7 @@ class PhoneTrustScore:
                                  phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on phone metadata
-        Returns a score from 0-30 and a list of risk factors
+        Returns a score from 0-35 and a list of risk factors
         """
         risks = []
         
@@ -194,7 +193,7 @@ class PhoneTrustScore:
                                phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on device information
-        Returns a score from 0-20 and a list of risk factors
+        Returns a score from 0-30 and a list of risk factors
         """
         risks = []
         
@@ -226,7 +225,7 @@ class PhoneTrustScore:
                                  phone_number: str) -> Tuple[int, List[str]]:
         """
         Calculate a score based on phone activity patterns
-        Returns a score from 0-30 and a list of risk factors
+        Returns a score from 0-35 and a list of risk factors
         """
         risks = []
         
@@ -423,16 +422,39 @@ class PhoneTrustScore:
                 return local_number
             return clean_number
 
-    def _load_high_risk_countries(self):
-        return {"234", "84", "62", "63"}
+def update_trust_score_in_db(supabase_client, user_id: int, result: TrustScoreResult):
+    """Update the trust score in the database"""
+    # Update the trust score in the database
+    response = (
+        supabase_client.table("users")
+        .update({"creator_trust_score": result.overall_score})
+        .eq("id", user_id)
+        .execute()
+    )
 
-def get_trust_score(phone_number: str) -> float:
+def process_trust_score(user_id: int):
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SECRET")
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL or API key in environment")
+    supabase_client = supabase.create_client(url, key)
+    
+    response = supabase_client.table("user_info").select("phone").eq("id", user_id).execute()
+    
+    # Check if we got data
+    if not response.data or len(response.data) == 0:
+        raise ValueError(f"No user found with ID {user_id}")
+    
+    # Extract the actual phone number string
+    phone_number = response.data[0].get("phone")
+
     trust_scorer = PhoneTrustScore()
     result = trust_scorer.calculate_trust_score(phone_number, datetime.now().strftime("%Y-%m-%d"))
-    return result.overall_score
+    print(result)
+    update_trust_score_in_db(supabase_client, user_id, result)
 
 if __name__ == "__main__":
-    get_trust_score("+445544332211")
+    process_trust_score(3)
     # trust_scorer = PhoneTrustScore()
     # # Test with sample numbers
     # test_numbers = ["+445544332211", "+6590123456"]
