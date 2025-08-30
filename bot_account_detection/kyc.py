@@ -2,7 +2,7 @@ import os
 import re
 import datetime
 from typing import List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
 import phonenumbers
@@ -30,10 +30,9 @@ class KYCLevel(Enum):
 
 @dataclass
 class PersonalInfo:
-    id: int
     first_name: str
     last_name: str
-    date_of_birth: str  # DD-MM-YYYY format
+    date_of_birth: str
     nationality: str
     address: str
     phone: str
@@ -41,7 +40,6 @@ class PersonalInfo:
 
 @dataclass
 class DocumentInfo:
-    document_id: int
     full_name: str
     document_type: DocumentType
     document_number: str
@@ -76,7 +74,7 @@ class KYCChecker:
         personal_flags, personal_score = self._validate_personal_info(personal_info)
         flags.extend(personal_flags)
         score -= personal_score
-        
+        print(f"Personal info flags: {personal_flags}, score deduction: {personal_score}")
         # Validate documents
         doc_flags, doc_score = self._validate_documents(documents)
         flags.extend(doc_flags)
@@ -301,10 +299,8 @@ class KYCManager:
 
     def get_kyc_status(self, application_id: str) -> Optional[KYCResult]:
         """Get KYC status by application ID"""
-        if application_id in self.results_storage:
-            return self.results_storage[application_id]['result']
         return None
-    
+
     def _generate_application_id(self, user_id: str) -> str:
         """Generate unique application ID"""
         timestamp = str(int(datetime.datetime.now().timestamp()))
@@ -321,7 +317,6 @@ def get_user_info(supabase_client, user_id: int) -> PersonalInfo:
     user_data = response.data[0]
 
     return PersonalInfo(
-        id=user_data.get("id"),
         first_name=user_data.get("first_name"),
         last_name=user_data.get("last_name"),
         date_of_birth=user_data.get("date_of_birth"),
@@ -373,7 +368,7 @@ def update_database(supabase_client, user_id: int, kyc_result: KYCResult) -> Non
         .execute()
     )
 
-def submit_kyc_application(user_id: int) -> None:
+def submit_kyc_application(user_id: int, personal_info: PersonalInfo, documents: List[DocumentInfo]) -> int:
     """Submit a KYC application"""
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SECRET")
@@ -381,11 +376,47 @@ def submit_kyc_application(user_id: int) -> None:
     if not url or not key:
         raise RuntimeError("Missing SUPABASE_URL or API key in environment")
     supabase_client = supabase.create_client(url, key)
+    
+    personal_info_dict = asdict(personal_info)
+    supabase_client.table("user_info").update(personal_info_dict).eq("id", user_id).execute()
+
+    for doc in documents:
+        doc_dict = asdict(doc)
+        supabase_client.table("documents").update(doc_dict).eq("user_id", user_id).eq("document_type", doc.document_type).execute()
+
     user_info = get_user_info(supabase_client, user_id)
-    documents = get_user_documents(supabase_client, user_info.id)
+    print("Received user_info")
+    documents = get_user_documents(supabase_client, user_id)
+    print("Received user_documents")
+
     kyc_manager = KYCManager()
     results = kyc_manager.process_kyc_application(user_info, documents)
+    
     update_database(supabase_client, user_id, results)
+    print(f"KYC Result: {results}")
+    return results.kyc_level.value
 
 if __name__ == "__main__":
-    submit_kyc_application(3)
+    pass
+    # personal_info = PersonalInfo(
+    #     first_name="John",
+    #     last_name="Doe",
+    #     date_of_birth="1990-01-01",
+    #     nationality="American",
+    #     address="123 Main St, Anytown, USA",
+    #     phone="123-456-7890",
+    #     email="john.doe@example.com"
+    # )
+    # documents = [
+    #     DocumentInfo(
+    #         full_name="John Doe",
+    #         document_type=DocumentType.PASSPORT.value,
+    #         document_number="A123456789",
+    #         issued_date="2015-01-01",
+    #         expiry_date="2025-01-01",
+    #         user_id=751,
+    #         issuing_country="USA",
+    #         submit_date="2023-01-01"
+    #     )
+    # ]
+    # submit_kyc_application(751, personal_info, documents)

@@ -1,14 +1,15 @@
+from http import client
 import streamlit as st
 import sys
 import os
 from datetime import datetime, timedelta
 from typing import List, Optional
-import json
 
 # Add the bot_account_detection directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from bot_account_detection import KYCManager, PersonalInfo, DocumentInfo, KYCResult, KYCStatus, KYCLevel, DocumentType, PhoneTrustScore, TrustLevel
+from bot_account_detection.kyc import submit_kyc_application
 
 def initialize_session_state():
     """Initialize session state variables"""
@@ -58,7 +59,7 @@ def validate_form_data(personal_info: dict, documents: List[dict]) -> tuple[bool
 def format_date_for_backend(date_obj) -> str:
     """Convert date object to DD-MM-YYYY format required by backend"""
     if date_obj:
-        return date_obj.strftime("%d-%m-%Y")
+        return date_obj.strftime("%Y-%m-%d")
     return ""
 
 def display_kyc_results(kyc_result: KYCResult, trust_score_result):
@@ -162,12 +163,12 @@ def display_kyc_results(kyc_result: KYCResult, trust_score_result):
 def main():
     st.set_page_config(
         page_title="KYC Verification",
-        page_icon="🔍",
         layout="wide"
     )
     
     initialize_session_state()
-    
+    curr_user_id = st.session_state.get('creator_id', 3)
+
     st.title("🔍 Know Your Customer (KYC) Verification")
     st.write("Please complete the form below to verify your identity and assess your account trustworthiness.")
     
@@ -251,7 +252,7 @@ def main():
                     expiry_date = st.date_input(
                         "Expiry Date (if applicable)",
                         key=f"expiry_date_{i}",
-                        min_value=datetime.now(),
+                        min_value=datetime.now() - timedelta(days=365*5),
                         max_value=datetime.now() + timedelta(days=365*20),
                         value=None
                     )
@@ -265,12 +266,12 @@ def main():
                 # Only add document if type is selected
                 if doc_type:
                     documents.append({
+                        'full_name': full_name_on_doc,
                         'document_type': doc_type,
                         'document_number': doc_number,
-                        'full_name': full_name_on_doc,
                         'issued_date': issued_date,
                         'expiry_date': expiry_date,
-                        'issuing_country': issuing_country
+                        'issuing_country': issuing_country,
                     })
                 
                 st.divider()
@@ -309,37 +310,30 @@ def main():
                             phone=phone,
                             email=email
                         )
-                        
                         # Create Document objects
                         document_objects = []
                         for doc in documents:
                             if doc['document_type']:  # Only process if document type is selected
                                 document_objects.append(DocumentInfo(
-                                    document_type=DocumentType(doc['document_type']),
-                                    document_number=doc['document_number'],
                                     full_name=doc['full_name'],
+                                    document_type=doc['document_type'],
+                                    document_number=doc['document_number'],
                                     issued_date=format_date_for_backend(doc['issued_date']),
                                     expiry_date=format_date_for_backend(doc['expiry_date']) if doc['expiry_date'] else "",
-                                    issuing_country=doc['issuing_country']
+                                    user_id=curr_user_id,
+                                    issuing_country=doc['issuing_country'],
+                                    submit_date=datetime.now().strftime("%Y-%m-%d")
                                 ))
                         
-                        # Initialize KYC checker
-                        kyc_manager = KYCManager()
-                        
                         # Process KYC verification
-                        application_id = kyc_manager.process_kyc_application(
-                            user_id="demo_user",
-                            personal_info=personal_info_obj,
-                            documents=document_objects
-                        )
-                        
-                        kyc_result = kyc_manager.get_kyc_status(application_id)
-                        
+
+                        kyc_result = submit_kyc_application(curr_user_id, personal_info_obj, document_objects)
+
                         # Calculate trust score for phone number
                         trust_scorer = PhoneTrustScore()
                         trust_score_result = trust_scorer.calculate_trust_score(
                             phone_number=phone,
-                            date=datetime.now().strftime("%d-%m-%Y")
+                            date=datetime.now().strftime("%Y-%m-%d")
                         )
                         
                         # Store results in session state
