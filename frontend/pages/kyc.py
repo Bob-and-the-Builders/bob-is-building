@@ -122,7 +122,7 @@ def display_kyc_results(kyc_result: KYCResult, trust_score_result):
             }
             
             trust_color = trust_colors.get(trust_score_result.trust_level, "gray")
-            st.markdown(f"**Trust Level:** <span style='color: {trust_color}'>{trust_score_result.trust_level.value.upper()}</span>", 
+            st.markdown(f"**Trust Level:** <span style='color: {trust_color}'>{trust_score_result.trust_level.name}</span>", 
                        unsafe_allow_html=True)
             
             # Score with progress bar

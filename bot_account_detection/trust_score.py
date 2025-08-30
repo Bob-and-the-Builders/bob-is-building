@@ -94,7 +94,7 @@ class PhoneTrustScore:
 
     def calculate_trust_score(self, 
                              phone_number: str,
-                             date: str) -> int:
+                             date: str) -> TrustScoreResult:
         """
         Calculate a trust score for a phone number
         
@@ -161,7 +161,7 @@ class PhoneTrustScore:
         print(f"Trust score for {phone_number}: {overall_score} ({trust_level.value})")
         print(f"calculation time: {time.time() - start_time:.2f}s")
 
-        return overall_score
+        return result
 
     def _calculate_metadata_score(self, 
                                  phone_number: str) -> Tuple[int, List[str]]:

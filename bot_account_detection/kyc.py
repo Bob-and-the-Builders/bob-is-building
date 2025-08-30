@@ -367,7 +367,7 @@ def update_database(supabase_client, user_id: int, kyc_result: KYCResult) -> Non
         .execute()
     )
 
-def submit_kyc_application(user_id: int, personal_info: PersonalInfo, documents: List[DocumentInfo]) -> int:
+def submit_kyc_application(user_id: int, personal_info: PersonalInfo, documents: List[DocumentInfo]) -> KYCResult:
     """Submit a KYC application"""
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SECRET")
@@ -393,7 +393,7 @@ def submit_kyc_application(user_id: int, personal_info: PersonalInfo, documents:
     
     update_database(supabase_client, user_id, results)
     print(f"KYC Result: {results}")
-    return results.kyc_level.value
+    return results
 
 if __name__ == "__main__":
     pass
