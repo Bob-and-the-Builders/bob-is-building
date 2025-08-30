@@ -3,9 +3,10 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import streamlit as st
+from datetime import datetime, timedelta, timezone
 
 from core.supabase_client import get_supabase_client
-from core.analysis_engine import AnalysisEngine
+from viewer_activity.analyzer import analyze_window
 from ui.components import (
     display_eis_gauge,
     display_metric_card,
@@ -60,17 +61,19 @@ def main():
     )
     selected_video = videos[selected_idx]
 
-    # Compute EIS
-    engine = AnalysisEngine(sb)
+    # Compute EIS using viewer_activity analyzer over the last 30 days
     with st.spinner("Computing Engagement Integrity Score..."):
-        result = engine.calculate_eis(selected_video["id"])  # accepts UUID or int
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=30)
+        result = analyze_window(selected_video["id"], start_dt, end_dt)
 
     eis = float(result.get("eis", 0.0))
     breakdown = result.get("breakdown", {})
-    ae_val = float(breakdown.get("authentic_engagement", 0.0))
-    cq_val = float(breakdown.get("comment_quality", 0.0))
-    li_val = float(breakdown.get("like_integrity", 0.0))
-    rc_val = float(breakdown.get("report_credibility", 0.0))
+    # Use analyzer's top-level component scores (details live in breakdown)
+    ae_val = float(result.get("authentic_engagement", 0.0))
+    cq_val = float(result.get("comment_quality", 0.0))
+    li_val = float(result.get("like_integrity", 0.0))
+    rc_val = float(result.get("report_credibility", 0.0))
 
     overview_tab, anomalies_tab = st.tabs(["Overview", "Anomaly Detection"])
 
