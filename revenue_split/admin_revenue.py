@@ -31,6 +31,7 @@ with st.form("rw"):
     platform_fee_pct = st.slider("Platform fee %", 0.0, 0.5, 0.10, 0.01)
     reserve_pct = st.slider("Safety reserve %", 0.0, 0.5, 0.10, 0.01)
     min_payout = st.number_input("Min payout (cents)", min_value=0, value=1000)
+<<<<<<< HEAD
     hold_days = st.number_input("Reserve hold days", min_value=0, value=14)
 
     submitted = st.form_submit_button("Run allocation")
@@ -60,3 +61,28 @@ if submitted:
         st.json(out["video_rev_shares"][:50])
         st.subheader("Creator payouts")
         st.json(out["creator_payouts"])
+=======
+    submitted = st.form_submit_button("Run allocation")
+
+if submitted:
+    out = finalize_revenue_window(
+        start,
+        end,
+        gross_revenue_cents=int(gross),
+        taxes_cents=int(taxes),
+        app_store_fees_cents=int(store),
+        refunds_cents=int(refunds),
+        pool_pct=float(pool_pct),
+        margin_target=float(margin_target),
+        risk_reserve_pct=float(reserve_pct),
+        platform_fee_pct=float(platform_fee_pct),
+        min_payout_cents=int(min_payout),
+    )
+    st.success("Allocation complete.")
+    st.subheader("Revenue window")
+    st.json(out["revenue_window"])
+    st.subheader("Video allocations (first 50)")
+    st.json(out["video_rev_shares"][:50])
+    st.subheader("Creator payouts")
+    st.json(out["creator_payouts"])
+>>>>>>> b0d6446 (fixed again)

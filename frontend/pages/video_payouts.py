@@ -43,7 +43,11 @@ def get_payout_data(user_id: int):
             # If the column does not exist or call fails, we will compute a fallback below
             current_balance_cents = 0
 
+<<<<<<< HEAD
         # Fetch all transactions for the creator from 'transactions' table using 'user_id'
+=======
+        # Fetch all transactions for the creator from 'transactions' table using 'recipient'
+>>>>>>> b0d6446 (fixed again)
         tx_resp = supabase.table("transactions").select("*").eq("recipient", user_id).execute()
         transactions = tx_resp.data or []
         transactions_df = pd.DataFrame(transactions)
@@ -51,18 +55,11 @@ def get_payout_data(user_id: int):
         # Fallback balance computation if not in users.current_balance
         if not current_balance_cents:
             if not transactions_df.empty:
-                # Available = sum of payout amounts not on hold (exclude reserves and future holds)
-                now_iso = pd.Timestamp.utcnow().tz_localize(None)
+                # Available = sum of completed payout amounts (exclude reserves and on_hold)
                 df = transactions_df.copy()
-                # Parse hold_until if present
-                if "hold_until" in df.columns:
-                    df["hold_until_ts"] = pd.to_datetime(df["hold_until"], errors="coerce", utc=True).dt.tz_convert(None)
-                else:
-                    df["hold_until_ts"] = pd.NaT
-                is_payout = df.get("type", pd.Series([])).eq("payout") if "type" in df.columns else pd.Series(False, index=df.index)
-                not_on_hold = (~df.get("status", pd.Series([])).eq("on_hold")) if "status" in df.columns else pd.Series(True, index=df.index)
-                hold_released = (df["hold_until_ts"].isna()) | (df["hold_until_ts"] <= now_iso)
-                mask = is_payout & not_on_hold & hold_released
+                is_payout = df.get("payment_type", pd.Series([])).eq("payout") if "payment_type" in df.columns else pd.Series(False, index=df.index)
+                is_completed = df.get("status", pd.Series([])).eq("completed") if "status" in df.columns else pd.Series(False, index=df.index)
+                mask = is_payout & is_completed
                 current_balance_cents = int(df.loc[mask, "amount_cents"].fillna(0).sum())
 
         return {"balance_cents": int(current_balance_cents or 0), "transactions": transactions_df}
@@ -127,8 +124,7 @@ if not transactions_df.empty:
     if 'created_at' in display_df.columns: cols.append('created_at')
     cols.append('Amount (USD)')
     if 'status' in display_df.columns: cols.append('status')
-    if 'type' in display_df.columns: cols.append('type')
-    if 'hold_until' in display_df.columns: cols.append('hold_until')
+    if 'payment_type' in display_df.columns: cols.append('payment_type')
 
     if 'created_at' in display_df.columns:
         display_df = display_df.sort_values('created_at', ascending=False)
@@ -140,8 +136,7 @@ if not transactions_df.empty:
             "created_at": st.column_config.DatetimeColumn("Date", help="The date and time of the transaction."),
             "Amount (USD)": st.column_config.NumberColumn(format="$%.2f", help="The transaction amount in US dollars."),
             "status": st.column_config.TextColumn("Status", help="The current status of the transaction (e.g., pending, on_hold, completed)."),
-            "type": st.column_config.TextColumn("Type", help="Transaction type (payout, reserve, etc.)."),
-            "hold_until": st.column_config.DatetimeColumn("Hold Until", help="Funds are released after this time (UTC)."),
+            "payment_type": st.column_config.TextColumn("Type", help="Transaction type (payout, reserve, etc.)."),
         }
     )
 else:

@@ -352,9 +352,8 @@ def finalize_revenue_window(
     for cid in scaled:
         scaled[cid] = int(scaled[cid] * factor)
 
-    # Write creator payouts/reserves to transactions
+    # Write creator payouts/reserves to transactions (schema: recipient, amount_cents, status, payment_type)
     payouts = []
-    hold_until = (now.replace(microsecond=0) + timedelta(days=hold_days)).isoformat()
     for cid, alloc_c in scaled.items():
         platform_fee = int(platform_fee_pct * alloc_c)
         reserve = int(risk_reserve_pct * alloc_c)
@@ -365,21 +364,19 @@ def finalize_revenue_window(
         if pay_now > 0:
             sb.table("transactions").insert(
                 {
-                    "user_id": cid,
-                    "type": "payout",
+                    "recipient": cid,
+                    "payment_type": "payout",
                     "amount_cents": pay_now,
                     "status": "pending",
-                    "hold_until": now.isoformat(),
                 }
             ).execute()
         if reserve > 0:
             sb.table("transactions").insert(
                 {
-                    "user_id": cid,
-                    "type": "reserve",
+                    "recipient": cid,
+                    "payment_type": "reserve",
                     "amount_cents": reserve,
                     "status": "on_hold",
-                    "hold_until": hold_until,
                 }
             ).execute()
         payouts.append(
@@ -394,4 +391,3 @@ def finalize_revenue_window(
         )
 
     return {"revenue_window": win, "video_rev_shares": vrs_rows, "creator_payouts": payouts}
-

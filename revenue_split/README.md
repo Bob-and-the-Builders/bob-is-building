@@ -71,11 +71,11 @@ Usage
    - Platform margin = `(R_net - costs_est - CreatorPool)/R_gross ≥ margin_target`.
    - Early natural/diverse videos get small +5% VU; clustered device/IP get down-weighted.
    - High 7-day EIS creators receive +3% (renormalized to preserve the pool).
-   - `transactions` contains payout and reserve rows with appropriate holds.
+  - `transactions` contains payout and reserve rows using schema: `recipient`, `amount_cents`, `status`, `payment_type`.
 
 Notes
 -----
 - All times are UTC.
 - Streamlit runs server-side; do not expose service keys to browser clients.
+- This module writes to `transactions` using your schema: `recipient` (FK to `users.id`), `amount_cents` (int8), `status` (text), `payment_type` (text, e.g., payout/reserve).
 - This module does not modify any existing EIS logic and is content-agnostic.
-
