@@ -5,7 +5,7 @@ from supabase import Client
 # --- Boilerplate and Supabase Initialization ---
 st.set_page_config(page_title="Video Payouts", layout="wide")
 
-supabase: Client = st.session_state['supabase']
+supabase: Client = st.session_state.get('supabase')
 
 st.title("💰 Video Payouts")
 
@@ -27,26 +27,54 @@ def get_payout_data(user_id: int):
         return None
     
     try:
-        # Fetch the user's current balance from the 'users' table
-        user_response = supabase.table("users").select("current_balance").eq("id", user_id).single().execute()
-        current_balance_cents = user_response.data.get('current_balance', 0) if user_response.data else 0
+        # Fetch the user's current balance (if present) from 'users'
+        current_balance_cents = 0
+        try:
+            user_response = (
+                supabase.table("users")
+                .select("current_balance")
+                .eq("id", user_id)
+                .single()
+                .execute()
+            )
+            if getattr(user_response, "data", None):
+                current_balance_cents = user_response.data.get("current_balance", 0) or 0
+        except Exception:
+            # If the column does not exist or call fails, we will compute a fallback below
+            current_balance_cents = 0
 
-        # Fetch all transactions for the creator from the 'transactions' table
-        # We assume the 'recipient' column in 'transactions' matches the user's 'id'
-        transactions_response = supabase.table("transactions").select("*").eq("recipient", user_id).execute()
-        
-        transactions_df = pd.DataFrame(transactions_response.data)
+        # Fetch all transactions for the creator from 'transactions' table using 'user_id'
+        tx_resp = supabase.table("transactions").select("*").eq("user_id", user_id).execute()
+        transactions = tx_resp.data or []
+        transactions_df = pd.DataFrame(transactions)
 
-        return {
-            "balance_cents": current_balance_cents,
-            "transactions": transactions_df
-        }
+        # Fallback balance computation if not in users.current_balance
+        if not current_balance_cents:
+            if not transactions_df.empty:
+                # Available = sum of payout amounts not on hold (exclude reserves and future holds)
+                now_iso = pd.Timestamp.utcnow().tz_localize(None)
+                df = transactions_df.copy()
+                # Parse hold_until if present
+                if "hold_until" in df.columns:
+                    df["hold_until_ts"] = pd.to_datetime(df["hold_until"], errors="coerce", utc=True).dt.tz_convert(None)
+                else:
+                    df["hold_until_ts"] = pd.NaT
+                is_payout = df.get("type", pd.Series([])).eq("payout") if "type" in df.columns else pd.Series(False, index=df.index)
+                not_on_hold = (~df.get("status", pd.Series([])).eq("on_hold")) if "status" in df.columns else pd.Series(True, index=df.index)
+                hold_released = (df["hold_until_ts"].isna()) | (df["hold_until_ts"] <= now_iso)
+                mask = is_payout & not_on_hold & hold_released
+                current_balance_cents = int(df.loc[mask, "amount_cents"].fillna(0).sum())
+
+        return {"balance_cents": int(current_balance_cents or 0), "transactions": transactions_df}
     except Exception as e:
         st.error(f"Error fetching payout data from Supabase: {e}")
         return None
 
 # --- Fetch and Load Data ---
-user_id = st.session_state['creator_id']
+user_id = st.session_state.get('creator_id') or (user.get('id') if isinstance(user, dict) else None)
+if not user_id:
+    st.warning("No creator_id found in session.")
+    st.stop()
 payout_data = get_payout_data(user_id)
 
 if not payout_data:
@@ -89,16 +117,31 @@ if not transactions_df.empty:
     display_df = transactions_df.copy()
 
     # Convert amount from cents to dollars for display
-    display_df['Amount (USD)'] = display_df['amount_cents'] / 100
+    if 'amount_cents' in display_df.columns:
+        display_df['Amount (USD)'] = display_df['amount_cents'] / 100
+    else:
+        display_df['Amount (USD)'] = 0.0
+
+    # Preferred columns with safe fallbacks
+    cols = []
+    if 'created_at' in display_df.columns: cols.append('created_at')
+    cols.append('Amount (USD)')
+    if 'status' in display_df.columns: cols.append('status')
+    if 'type' in display_df.columns: cols.append('type')
+    if 'hold_until' in display_df.columns: cols.append('hold_until')
+
+    if 'created_at' in display_df.columns:
+        display_df = display_df.sort_values('created_at', ascending=False)
 
     st.dataframe(
-        display_df[['created_at', 'Amount (USD)', 'status', 'payment_type']].sort_values('created_at', ascending=False),
+        display_df[cols],
         use_container_width=True,
         column_config={
             "created_at": st.column_config.DatetimeColumn("Date", help="The date and time of the transaction."),
             "Amount (USD)": st.column_config.NumberColumn(format="$%.2f", help="The transaction amount in US dollars."),
-            "status": st.column_config.TextColumn("Status", help="The current status of the transaction (e.g., completed, pending)."),
-            "payment_type": st.column_config.TextColumn("Type", help="The type of payment (e.g., video earning, bonus).")
+            "status": st.column_config.TextColumn("Status", help="The current status of the transaction (e.g., pending, on_hold, completed)."),
+            "type": st.column_config.TextColumn("Type", help="Transaction type (payout, reserve, etc.)."),
+            "hold_until": st.column_config.DatetimeColumn("Hold Until", help="Funds are released after this time (UTC)."),
         }
     )
 else:
