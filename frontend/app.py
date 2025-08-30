@@ -52,6 +52,7 @@ signout_page = st.Page(sign_out, title="Sign out", icon=":material/logout:")
 dashboard = st.Page("pages/creator_dashboard.py", title="Dashboard", icon=":material/dashboard:", default=True)
 upload_video = st.Page("pages/upload_video.py", title="Upload Video", icon=":material/upload:")
 payout = st.Page("pages/video_payouts.py", title="Payout", icon=":material/money:")
+kyc_page = st.Page("pages/kyc.py", title="KYC Verification", icon=":material/verified_user:")
 email_verified = st.Page("pages/email_verified.py", title="Email Verified", icon=":material/email:")
 
 # Check if user is already logged in (ensured above as well)
@@ -77,7 +78,7 @@ if st.session_state['user']:
     pg = st.navigation(
         {
             f"Hello {st.session_state['user'].email}": [signout_page],
-            "Content Creator Portal": [dashboard, upload_video, payout]
+            "Content Creator Portal": [dashboard, upload_video, payout, kyc_page]
         }
     )
 else:
