@@ -6,7 +6,11 @@ import streamlit as st
 
 from core.supabase_client import get_supabase_client
 from core.analysis_engine import AnalysisEngine
-from ui.components import display_eis_gauge, display_metric_card
+from ui.components import (
+    display_eis_gauge,
+    display_metric_card,
+    display_anomaly_card,
+)
 
 
 def _get_creator_videos(sb, creator_id):
@@ -102,31 +106,117 @@ def main():
 
     with anomalies_tab:
         st.subheader("Signals & Warnings")
-        any_flag = False
 
+        anomalies = []
+
+        # Authentic Engagement
         if ae_val < 50:
-            any_flag = True
-            st.warning(
-                "Low Authentic Engagement: interactions appear concentrated in a few event types."
-            )
-        if cq_val < 50:
-            any_flag = True
-            st.warning(
-                "Low Comment Quality: limited unique commenters and/or lower average trust."
-            )
-        if li_val < 50:
-            any_flag = True
-            st.warning(
-                "Low Like Integrity: likes may come from a small or lower-trust cohort."
-            )
-        if rc_val < 70:
-            any_flag = True
-            st.error(
-                "Elevated Report Credibility: consider reviewing the content and community feedback."
+            anomalies.append(
+                {
+                    "title": "Low Authentic Engagement",
+                    "score": ae_val,
+                    "explanation": (
+                        "Engagement appears concentrated in fewer interaction types, suggesting the content may not be broadly resonating."
+                    ),
+                    "recommendation": (
+                        "Experiment with stronger hooks, clearer CTAs, and varied formats (e.g., questions, polls) to encourage a mix of views, likes, and comments."
+                    ),
+                    "details": (
+                        f"Authentic Engagement score is {ae_val:.1f} (threshold 50). Review distribution across views, likes, comments, and shares to spot concentration or drop-offs."
+                    ),
+                    "severity": "warning",
+                }
             )
 
-        if not any_flag:
+        # Comment Quality
+        if cq_val < 50:
+            anomalies.append(
+                {
+                    "title": "Low Comment Quality",
+                    "score": cq_val,
+                    "explanation": (
+                        "Comments suggest limited unique participation and/or lower average commenter trust (VTS)."
+                    ),
+                    "recommendation": (
+                        "Prompt specific, meaningful replies; moderate low-effort or spammy comments; and engage top commenters to lift quality and diversity."
+                    ),
+                    "details": (
+                        f"Comment Quality score is {cq_val:.1f} (threshold 50). Consider unique commenters, their trust (VTS), and repetition or spam indicators."
+                    ),
+                    "severity": "warning",
+                }
+            )
+
+        # Like Integrity
+        if li_val < 50:
+            anomalies.append(
+                {
+                    "title": "Low Like Integrity",
+                    "score": li_val,
+                    "explanation": (
+                        "Likes may be clustered within a small or lower-trust cohort, which can indicate inauthentic amplification."
+                    ),
+                    "recommendation": (
+                        "Broaden audience reach and avoid tactics that incentivize low-quality likes; focus on organic discovery and authentic engagement."
+                    ),
+                    "details": (
+                        f"Like Integrity score is {li_val:.1f} (threshold 50). Inspect like-user diversity and average VTS to spot suspicious clusters."
+                    ),
+                    "severity": "warning",
+                }
+            )
+
+        # Report Credibility (critical below 70)
+        if rc_val < 70:
+            # Pull rich debug info when available (from viewer_activity analyzer)
+            rc_details = breakdown.get("report_cleanliness", {}) or {}
+            rc_count = rc_details.get("report_count")
+            rc_avg_vts = rc_details.get("avg_reporter_vts")
+            rc_penalty = rc_details.get("penalty")
+            rc_reporters = rc_details.get("reporters") or []
+            # Show up to 3 sample reporters with VTS
+            sample = ", ".join(
+                [
+                    f"{str(r.get('user_id'))}: {float(r.get('vts') or 0.0):.1f}"
+                    for r in rc_reporters[:3]
+                ]
+            ) or "None"
+            details_lines = [
+                f"Report Credibility score is {rc_val:.1f} (threshold 70).",
+                f"Reports: {rc_count if rc_count is not None else 'N/A'}",
+                f"Avg reporter VTS: {rc_avg_vts:.1f}" if isinstance(rc_avg_vts, (int, float)) else "Avg reporter VTS: N/A",
+                f"Penalty applied: {rc_penalty:.2f}" if isinstance(rc_penalty, (int, float)) else "Penalty applied: N/A",
+                f"Sample reporters (user_id: VTS): {sample}",
+            ]
+            details_text = "\n".join(details_lines)
+
+            anomalies.append(
+                {
+                    "title": "Elevated Report Credibility",
+                    "score": rc_val,
+                    "explanation": (
+                        "Higher-credibility users are reporting this video, which can signal policy or community guideline concerns."
+                    ),
+                    "recommendation": (
+                        "Review the content against policies, check community feedback, and consider edits, disclaimers, or takedown if warranted. Respond transparently if appropriate."
+                    ),
+                    "details": details_text,
+                    "severity": "alert",
+                }
+            )
+
+        if not anomalies:
             st.success("No anomalies detected. Engagement appears organic and healthy.")
+        else:
+            for a in anomalies:
+                display_anomaly_card(
+                    title=a["title"],
+                    score=a["score"],
+                    explanation=a["explanation"],
+                    recommendation=a["recommendation"],
+                    details=a["details"],
+                    severity=a.get("severity", "warning"),
+                )
 
 
 if __name__ == "__main__":

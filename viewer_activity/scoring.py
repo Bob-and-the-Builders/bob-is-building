@@ -203,12 +203,48 @@ def like_integrity(likes: List[Dict], vts_map: Dict[str, float]) -> float:
     return like_integrity_with_details(likes, vts_map)[0]
 
 def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, float]) -> Tuple[float, Dict]:
-    if not reports:
-        return 90.0, {"weighted_vts": 0.0, "penalty": 0.0}
-    weight = sum((_vts_lookup(vts_map, r.get("user_id")) / 100.0) for r in reports)
-    penalty = 25.0 * weight
-    score = float(max(0.0, 100.0 - penalty))
-    return score, {"weighted_vts": weight, "penalty": penalty}
+    """Compute report cleanliness (higher is better) with debug details.
+
+    Penalty is based on the average VTS of reporters and grows gently with
+    the number of reports:
+        penalty = avg_reporter_vts * log1p(report_count) * 15.0
+
+    Returns a tuple (score, details) where details include:
+      - report_count
+      - avg_reporter_vts
+      - penalty
+      - reporters: [{user_id, vts}, ...]
+    """
+    # Step 1.1: Gather detailed stats
+    report_count = len(reports) if reports else 0
+    vts_of_reporters = [
+        _vts_lookup(vts_map, r.get("user_id")) for r in (reports or [])
+    ]
+    avg_reporter_vts_calc = (
+        sum(vts_of_reporters) / report_count if report_count > 0 else 0.0
+    )
+
+    # Step 1.2: New penalty formula
+    penalty = float(avg_reporter_vts_calc * math.log1p(report_count) * 15.0)
+
+    # Score calculation: start from 100 and subtract penalty; clamp to [0,100]
+    # Preserve prior behavior of returning a safe baseline when no reports
+    if report_count == 0:
+        score = 90.0
+    else:
+        score = float(max(0.0, min(100.0, 100.0 - penalty)))
+
+    # Step 1.3: Detailed return payload
+    details = {
+        "report_count": report_count,
+        "avg_reporter_vts": (avg_reporter_vts_calc if report_count > 0 else None),
+        "penalty": penalty,
+        "reporters": [
+            {"user_id": r.get("user_id"), "vts": _vts_lookup(vts_map, r.get("user_id"))}
+            for r in (reports or [])
+        ],
+    }
+    return score, details
 
 def report_cleanliness(reports: List[Dict], vts_map: Dict[str, float]) -> float:
     return report_cleanliness_with_details(reports, vts_map)[0]
