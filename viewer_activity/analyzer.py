@@ -14,6 +14,7 @@ from .scoring import (
     report_cleanliness_with_details,
     authentic_engagement_with_details,
     eis_score,
+    get_creator_trust_score,
 )
 from datetime import datetime, timedelta, timezone
 
@@ -110,20 +111,11 @@ def analyze_window(video_id, start, end):
 
     eis = eis_score(ae, cq, li, rc)
 
-    # Optional: small creator trust modulation if available
-    try:
-        creator_row = (
-            client.table("users").select("creator_trust_score").eq("id", creator_id).single().execute().data
-            if creator_id is not None
-            else None
-        )
-        if creator_row and creator_row.get("creator_trust_score") is not None:
-            cts = max(0.0, min(100.0, float(creator_row.get("creator_trust_score") or 0.0)))
-            factor = 0.95 + 0.10 * (cts / 100.0)  # 0.95..1.05
-            eis = float(max(0.0, min(100.0, eis * factor)))
-            feats["creator_trust_score"] = cts
-    except Exception:
-        pass
+    # Creator Trust Score modulation
+    cts = get_creator_trust_score(creator_id)
+    factor = 0.95 + 0.10 * (cts / 100.0)  # 0.95..1.05
+    eis = float(max(0.0, min(100.0, eis * factor)))
+    feats["creator_trust_score"] = cts
 
     # No content semantics used; score is strictly schema-based
 
@@ -132,7 +124,7 @@ def analyze_window(video_id, start, end):
         "comment_quality": cq_det,
         "like_integrity": li_det,
         "report_cleanliness": rc_det,
-        "weights": {"ae": 0.4, "cq": 0.25, "li": 0.2, "rc": 0.15},
+        "weights": {"ae": 0.4, "cq": 0.30, "li": 0.15, "rc": 0.15},
     }
 
     payload = {

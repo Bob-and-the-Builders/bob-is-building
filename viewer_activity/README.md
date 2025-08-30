@@ -54,8 +54,8 @@ Design & Data Flow
     - Authentic Engagement: likes/views + comments/views with duration/recency scaling, plus a small audience factor (active viewers) at 20% weight.
     - Comment Quality: who comments (unique commenters rate, commenters’ VTS), not what they say.
     - Like Integrity: commenters’ VTS, timing naturalness (CV of inter-arrival intervals), and device/IP clustering penalties.
-    - Report Cleanliness: higher-weighted reports reduce integrity.
-  - EIS blend: `0.4*AE + 0.25*CQ + 0.2*LI + 0.15*RC`, with a tiny creator trust modulation (±5%) if `users.creator_trust_score` exists.
+    - Report Credibility: higher-weighted reports reduce integrity; higher score is better.
+  - EIS blend: `0.4*AE + 0.30*CQ + 0.15*LI + 0.15*RC`, with a tiny creator trust modulation (±5%) based on a Creator Trust Score (CTS) derived from the last 10 updated videos’ `eis_current`.
   - Persists each window into `video_aggregates` and updates `videos.eis_current` + `videos.eis_updated_at`.
 - Scoring (`scoring.py`)
   - `comment_quality_with_details(comments, vts_map, active_viewers)` → score, details (`unique_commenters_rate`, `avg_commenter_vts`).

@@ -1,7 +1,10 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 import streamlit as st
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -54,6 +57,7 @@ upload_video = st.Page("pages/upload_video.py", title="Upload Video", icon=":mat
 payout = st.Page("pages/video_payouts.py", title="Payout", icon=":material/money:")
 kyc_page = st.Page("pages/kyc.py", title="KYC Verification", icon=":material/verified_user:")
 email_verified = st.Page("pages/email_verified.py", title="Email Verified", icon=":material/email:")
+video_analytics_page = st.Page("pages/video_analytics.py", title="Video Analytics", icon="📊")
 
 # Check if user is already logged in (ensured above as well)
 if 'user' not in st.session_state:
@@ -78,7 +82,7 @@ if st.session_state['user']:
     pg = st.navigation(
         {
             f"Hello {st.session_state['user'].email}": [signout_page],
-            "Content Creator Portal": [dashboard, upload_video, payout, kyc_page]
+            "Content Creator Portal": [dashboard, upload_video, video_analytics_page, payout, kyc_page],
         }
     )
 else:
