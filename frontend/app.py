@@ -48,6 +48,8 @@ def get_creator_id_from_email(email: str) -> int | None:
         st.warning(f"Could not resolve creator_id from user_info: {e}")
     return None
 
+st.set_page_config(page_title="TikTok Content Creator Portal")
+
 # Define the pages
 login_page = st.Page("pages/auth.py", title="Log in", icon=":material/login:")
 signout_page = st.Page(sign_out, title="Sign out", icon=":material/logout:")
