@@ -1,7 +1,3 @@
-Always show details
-# Create a plain-text README for the revenue_split module
-content = r"""Revenue Split Module (TXT)
-
 This package implements a margin-safe revenue split for short-form videos with four event-driven refinements, a stored Creator Trust Score adjustment, a hard-exclude for suspicious creators, and KYC-based earning caps (with fair redistribution of over-cap funds).
 
 Files:
@@ -14,10 +10,6 @@ revenue_split/
   revenue_split.py
   revenue_split_monthly.py
 
-
-====================================
-Data model (Supabase)
-====================================
 Tables & columns used:
 
 users
@@ -57,9 +49,9 @@ Recommended one-time SQL hardening:
   UPDATE users SET kyc_level=0 WHERE kyc_level IS NULL OR kyc_level::text IN ('', 'None');
 
 
-====================================
+
 Event weights
-====================================
+
 Daily raw units per video are computed from events with fixed weights:
 
   raw_units = 1*views + 3*likes + 5*comments + 8*shares
@@ -67,9 +59,9 @@ Daily raw units per video are computed from events with fixed weights:
 (Weights are configurable via EVENT_WEIGHTS.)
 
 
-====================================
+
 Multipliers (per video / per creator)
-====================================
+
 All multipliers multiply the raw units; the final per-creator units are aggregated before money scaling.
 
 1) Quality-Indexed Pool (±2%)
@@ -115,9 +107,9 @@ All multipliers multiply the raw units; the final per-creator units are aggregat
    If users.likely_bot = true => multiplier = 0.0 (no payout).
 
 
-====================================
+
 From units to money (pool scaling)
-====================================
+
 Given a pool (in cents) for a period (day or month):
 
   U = sum(u_i)  (final per-creator units)
@@ -132,9 +124,9 @@ KYC-based caps (per run) + redistribution:
 If a_i exceeds the cap, clamp to the cap. Redistribute the excess proportionally among creators who still have capacity (by their units). Iterate until stable. If everyone is capped, leftover cents are reported as unallocated. Caps are applied in both daily (RevenueSplitter.run) and monthly (revenue_split_monthly.py) flows.
 
 
-====================================
+
 File: revenue_split.py
-====================================
+
 Main class:
   from revenue_split.revenue_split import RevenueSplitter, make_client
 
@@ -168,9 +160,9 @@ Performance:
   - Money math is in cents (ints).
 
 
-====================================
+
 File: revenue_split_monthly.py (CLI)
-====================================
+
 Aggregates daily units across a month, scales by a monthly pool, applies KYC caps with redistribution, writes one monthly inflow per creator.
 
 Environment variables:
@@ -203,9 +195,9 @@ Idempotency:
   - Skips if that month already has any transactions with payment_type='revenue_split_monthly'.
 
 
-====================================
+
 Example logs (dry-run)
-====================================
+
 [start] revenue_split_monthly
   Target 2025-08 | Pool $100,000.00 | DRY_RUN=True
   Day 01: events=184392
@@ -220,9 +212,8 @@ Example logs (dry-run)
 [dry-run] Unallocated due to KYC caps: 12345 cents (if caps constrain all remaining capacity)
 
 
-====================================
 Edge cases & notes
-====================================
+
 - KYC 0/NULL ⇒ no earnings. Their share is redistributed; if no capacity remains, pool may be partly unallocated.
 - likely_bot = true ⇒ 0× multiplier. No payout regardless of units or score.
 - Missing trust score ⇒ 1.00× (neutral).
