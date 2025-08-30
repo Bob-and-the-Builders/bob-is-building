@@ -44,7 +44,7 @@ def get_payout_data(user_id: int):
             current_balance_cents = 0
 
         # Fetch all transactions for the creator from 'transactions' table using 'user_id'
-        tx_resp = supabase.table("transactions").select("*").eq("user_id", user_id).execute()
+        tx_resp = supabase.table("transactions").select("*").eq("recipient", user_id).execute()
         transactions = tx_resp.data or []
         transactions_df = pd.DataFrame(transactions)
 
