@@ -29,6 +29,18 @@ def resolve_creator_id(sb: Client, user: dict) -> int | None:
             return int(uid)
     return None
 
+def _to_display_dt(val, tz="UTC"):
+    # returns a tz-aware pandas.Timestamp or pd.NaT
+    if val is None:
+        return pd.NaT
+    # strings like "None", "", "NaT"
+    s = str(val).strip()
+    if s == "" or s.lower() in ("none", "nat", "nan"):
+        return pd.NaT
+    # parse anything pandas understands (ISO with/without microseconds, +00:00 etc.)
+    ts = pd.to_datetime(s, utc=True, errors="coerce")
+    return ts  # tz-aware or NaT
+
 @st.cache_data(ttl=600)
 def get_payout_data(recipient_id: int, refresh_key: int = 0):
     if not supabase or not recipient_id:
@@ -121,26 +133,24 @@ if not transactions_df.empty:
 
     # Dates: parse & sort, then produce clean string (handles NULLs)
     if "created_at" in display_df.columns:
-        # stringify and clean up common missing markers
-        display_df["created_at_raw"] = (
-            display_df["created_at"]
-            .astype(str)
-            .replace({"NaT": "—", "None": "—", "": "—"})
-        )
-
-        # Optional: if your DB stores ISO timestamps, lexicographic sort works fine
-        display_df = display_df.sort_values("created_at_raw", ascending=False)
+        display_df["__dt"] = display_df["created_at"].apply(_to_display_dt)
+        # Sort by true datetime (NaT sorts last)
+        display_df = display_df.sort_values("__dt", ascending=False)
+        # Format for UI (UTC, no microseconds, no tz suffix)
+        display_df["Date"] = display_df["__dt"].dt.tz_convert("UTC").dt.tz_localize(None).dt.strftime("%Y-%m-%d %H:%M:%S")
+        # Replace any remaining NaN/NaT display with a dash
+        display_df["Date"] = display_df["Date"].fillna("—")
     else:
-        display_df["created_at_raw"] = "—"
+        display_df["Date"] = "—"
 
-    # Only show the raw column (rename in UI)
-    cols = [c for c in ["created_at_raw", "Amount (USD)", "direction", "payment_type", "status"] if c in display_df.columns]
-
+    # Only show the clean Date (do NOT show raw created_at)
+    cols = [c for c in ["Date", "Amount (USD)", "direction", "payment_type", "status"] if c in display_df.columns]
     st.dataframe(
-        display_df[cols],
+        display_df[cols].reset_index(drop=True),
+        hide_index=True,
         use_container_width=True,
         column_config={
-            "created_at_raw": st.column_config.TextColumn("created_at (raw)"),
+            "Date": st.column_config.TextColumn("Date"),
             "Amount (USD)": st.column_config.NumberColumn(format="$%.2f"),
             "direction": st.column_config.TextColumn("Direction", help="inflow = earnings, outflow = payouts"),
             "payment_type": st.column_config.TextColumn("Type"),
