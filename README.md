@@ -60,6 +60,7 @@ This project brings together a Streamlit-powered Creator Portal, a transparent E
 - Core: `streamlit`, `supabase`, `python-dotenv`, `requests`, `moviepy`, `Faker`, `plotly`
 - Data/analytics: `pandas`, `numpy` (used in dashboards/pages)
 - UI assets: Streamlit material icons; no bundled static assets
+- Phone validation: phonenumbers
 
 ## Run It (Local)
 
