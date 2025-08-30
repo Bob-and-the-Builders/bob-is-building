@@ -1,3 +1,4 @@
+# revenue_split/revenue_split_monthly_legacy.py
 from __future__ import annotations
 import os
 import sys
@@ -5,13 +6,6 @@ import csv
 import calendar
 from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
-
-# require additional .env data, POOL_CENTS, YEAR, MONTH
-try:
-    from dotenv import load_dotenv
-    load_dotenv()  # loads .env into os.environ
-except Exception:
-    pass
 
 # Robust import (module or script)
 try:
@@ -58,7 +52,7 @@ def already_paid_for_month(sb, year: int, month: int) -> bool:
 
 
 def main():
-    print("[start] revenue_split_monthly (integrated)", flush=True)
+    print("[start] revenue_split_monthly", flush=True)
     pool_cents = int(os.getenv("POOL_CENTS", "10000000"))
     dry_run = _parse_bool(os.getenv("DRY_RUN", "true"))
     verbose = _parse_bool(os.getenv("VERBOSE", "1"))
@@ -77,7 +71,7 @@ def main():
     for d in range(1, last_day + 1):
         start_iso, end_iso = day_bounds_utc(year, month, d)
         cnt = (
-            sb.table("event").select("event_id", count="exact")
+            sb.table("event").select("id", count="exact")
             .gte("ts", start_iso).lt("ts", end_iso).execute()
         ).count or 0
         if verbose:
@@ -153,4 +147,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

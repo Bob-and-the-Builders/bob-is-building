@@ -48,6 +48,8 @@ def get_creator_id_from_email(email: str) -> int | None:
         st.warning(f"Could not resolve creator_id from user_info: {e}")
     return None
 
+st.set_page_config(page_title="TikTok Content Creator Portal")
+
 # Define the pages
 login_page = st.Page("pages/auth.py", title="Log in", icon=":material/login:")
 signout_page = st.Page(sign_out, title="Sign out", icon=":material/logout:")
@@ -57,7 +59,7 @@ upload_video = st.Page("pages/upload_video.py", title="Upload Video", icon=":mat
 payout = st.Page("pages/video_payouts.py", title="Payout", icon=":material/money:")
 kyc_page = st.Page("pages/kyc.py", title="KYC Verification", icon=":material/verified_user:")
 email_verified = st.Page("pages/email_verified.py", title="Email Verified", icon=":material/email:")
-video_analytics_page = st.Page("pages/video_analytics.py", title="Video Analytics", icon="📊")
+video_analytics_page = st.Page("pages/video_analytics.py", title="Analytics", icon=":material/insights:")
 
 # Check if user is already logged in (ensured above as well)
 if 'user' not in st.session_state:

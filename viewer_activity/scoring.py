@@ -206,8 +206,8 @@ def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, floa
     """Compute report cleanliness (higher is better) with debug details.
 
     Penalty is based on the average VTS of reporters and grows gently with
-    the number of reports:
-        penalty = avg_reporter_vts * log1p(report_count) * 15.0
+    the number of reports, scaled by a tunable constant:
+        penalty = avg_reporter_vts * log1p(report_count) * PENALTY_SCALAR
 
     Returns a tuple (score, details) where details include:
       - report_count
@@ -215,6 +215,9 @@ def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, floa
       - penalty
       - reporters: [{user_id, vts}, ...]
     """
+    # Step 1.0: Tunable penalty scalar (less sensitive)
+    PENALTY_SCALAR = 0.5
+
     # Step 1.1: Gather detailed stats
     report_count = len(reports) if reports else 0
     vts_of_reporters = [
@@ -224,8 +227,8 @@ def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, floa
         sum(vts_of_reporters) / report_count if report_count > 0 else 0.0
     )
 
-    # Step 1.2: New penalty formula
-    penalty = float(avg_reporter_vts_calc * math.log1p(report_count) * 15.0)
+    # Step 1.2: Penalty formula (tunable scalar)
+    penalty = float(avg_reporter_vts_calc * math.log1p(report_count) * PENALTY_SCALAR)
 
     # Score calculation: start from 100 and subtract penalty; clamp to [0,100]
     # Preserve prior behavior of returning a safe baseline when no reports
@@ -239,6 +242,7 @@ def report_cleanliness_with_details(reports: List[Dict], vts_map: Dict[str, floa
         "report_count": report_count,
         "avg_reporter_vts": (avg_reporter_vts_calc if report_count > 0 else None),
         "penalty": penalty,
+        "penalty_scalar": PENALTY_SCALAR,
         "reporters": [
             {"user_id": r.get("user_id"), "vts": _vts_lookup(vts_map, r.get("user_id"))}
             for r in (reports or [])

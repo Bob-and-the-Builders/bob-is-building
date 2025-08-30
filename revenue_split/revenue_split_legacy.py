@@ -1,34 +1,44 @@
+# revenue_split/revenue_split_legacy.py
 from __future__ import annotations
 
 import os
+import math
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple
 
 from supabase import create_client, Client
-from viewer_activity.analyzer import analyze_window
 
 # -----------------------------
-# Knobs (preserved where applicable)
+# Knobs
 # -----------------------------
+QUALITY_Z_TO_PCT   = 0.01     # z * 1% → clamped below
+QUALITY_CLAMP_PCT  = 0.02     # ±2%
+
+INTEGRITY_RANGE_PCT = 0.03    # ±3% mapped 0..1
 EARLY_WINDOW_HRS    = 2
 EARLY_KICKER_MULT   = 1.05
 EARLY_MIN_VIEWS     = 50
 EARLY_DEV_RATIO     = 0.50
 EARLY_IP_RATIO      = 0.40
 
+CLUSTER_START_SHARE = 0.20
+CLUSTER_MAX_PENALTY = 0.30
+CLUSTER_RAMP        = 2.0
+
 # Per-event weights
 EVENT_WEIGHTS = {"view": 1, "like": 3, "comment": 5, "share": 8}
 PAGE_SIZE = 10000
 
-# --- Creator score knobs (layered after value units) ---
+# --- Creator score knobs (layered after 7-day integrity) ---
 CREATOR_TRUST_MIN_MULT = 0.80   # payout floor at score = 0
 CREATOR_TRUST_MAX_MULT = 1.20   # payout cap at score = 100
 CREATOR_TRUST_SCALE_MAX = 100   # expected score range 0..100
 PENALIZE_LIKELY_BOT = True      # hard-exclude if users.likely_bot is true
 
 # --- KYC caps (per run: daily or monthly) ---
-KYC_CAPS_CENTS = {0: 0, 1: 5_000, 2: 50_000}  # cents
+# level 1 => $50 max; level 2 => $500 max; level 3+ => unlimited
+KYC_CAPS_CENTS = {0: 0,1: 5_000, 2: 50_000}  # cents
 
 
 # -----------------------------
@@ -39,10 +49,10 @@ def make_client() -> Client:
     key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     return create_client(url, key)
 
-def daterange_utc(d: date) -> Tuple[datetime, datetime]:
+def daterange_utc(d: date) -> Tuple[str, str]:
     start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
     end   = start + timedelta(days=1)
-    return start, end
+    return start.isoformat(), end.isoformat()
 
 def fetch_all(builder_fn, page_size=PAGE_SIZE) -> List[dict]:
     out: List[dict] = []
@@ -68,7 +78,7 @@ def iso_to_dt(s: str) -> datetime:
 # -----------------------------
 def load_events_for_day(sb: Client, run_day: date) -> List[dict]:
     start, end = daterange_utc(run_day)
-    return fetch_all(lambda: sb.table("event").select("*").gte("ts", start.isoformat()).lt("ts", end.isoformat()))
+    return fetch_all(lambda: sb.table("event").select("*").gte("ts", start).lt("ts", end))
 
 def load_events_between(sb: Client, start: datetime, end: datetime) -> List[dict]:
     return fetch_all(lambda: sb.table("event").select("*").gte("ts", start.isoformat()).lt("ts", end.isoformat()))
@@ -81,10 +91,26 @@ def load_users(sb: Client) -> Dict[int, dict]:
     rows = fetch_all(lambda: sb.table("users").select("*"))
     return {r["id"]: r for r in rows}
 
+# -----------------------------
+# Multipliers
+# -----------------------------
+def clamp(x: float, low: float, high: float) -> float:
+    return max(low, min(high, x))
 
-# -----------------------------
-# Preserved multipliers/helpers
-# -----------------------------
+def quality_multiplier(engagement_rate: float, mu: float, sigma: float) -> float:
+    if sigma == 0:
+        return 1.0
+    z = (engagement_rate - mu) / sigma
+    nudged = z * QUALITY_Z_TO_PCT
+    return 1.0 + clamp(nudged, -QUALITY_CLAMP_PCT, QUALITY_CLAMP_PCT)
+
+def integrity_multiplier_7d(views: int, uniq_dev: int, uniq_ip: int, likes: int, comments: int) -> float:
+    dev_div = min(1.0, 5.0 * (uniq_dev / max(1.0, views)))
+    ip_div  = min(1.0, 5.0 * (uniq_ip  / max(1.0, views)))
+    eng_h   = min(1.0, 10.0 * ((likes + comments) / max(1.0, views)))
+    score_0_1 = (dev_div + ip_div + eng_h) / 3.0
+    return (1.0 - INTEGRITY_RANGE_PCT) + (score_0_1 * 2 * INTEGRITY_RANGE_PCT)
+
 def early_kicker_mult_for_video(sb: Client, video_row: dict) -> float:
     """
     Compute early velocity in the first 2 hours AFTER creation (global window),
@@ -109,6 +135,23 @@ def early_kicker_mult_for_video(sb: Client, video_row: dict) -> float:
         return EARLY_KICKER_MULT
     return 1.0
 
+def cluster_penalty_mult(day_events_for_video: List[dict]) -> float:
+    views = [e for e in day_events_for_video if e["event_type"] == "view"]
+    if not views:
+        return 1.0
+    dev_counts = Counter([e.get("device_id") for e in views if e.get("device_id") is not None])
+    ip_counts  = Counter([e.get("ip_hash")   for e in views if e.get("ip_hash") is not None])
+
+    def top_share(cnt: Counter) -> float:
+        total = sum(cnt.values())
+        return 0.0 if total == 0 else (max(cnt.values()) / total)
+
+    ts = max(top_share(dev_counts), top_share(ip_counts))
+    if ts <= CLUSTER_START_SHARE:
+        return 1.0
+    penalty = CLUSTER_RAMP * (ts - CLUSTER_START_SHARE)
+    return max(1.0 - CLUSTER_MAX_PENALTY, 1.0 - penalty)
+
 def trust_to_mult(score: float | int | None) -> float:
     """
     Map a creator_trust_score in [0..CREATOR_TRUST_SCALE_MAX] to a multiplier in
@@ -122,7 +165,6 @@ def trust_to_mult(score: float | int | None) -> float:
         return 1.0
     s = max(0.0, min(s, float(CREATOR_TRUST_SCALE_MAX))) / float(CREATOR_TRUST_SCALE_MAX)
     return CREATOR_TRUST_MIN_MULT + s * (CREATOR_TRUST_MAX_MULT - CREATOR_TRUST_MIN_MULT)
-
 
 # -----------------------------
 # KYC cap application (redistribution)
@@ -231,21 +273,16 @@ def apply_kyc_caps(sb: Client, allocations: Dict[int, int], units: Dict[int, flo
     unallocated = pool - sum(alloc.values())
     return alloc, unallocated
 
-
 # -----------------------------
-# RevenueSplitter (Integrated with EIS)
+# RevenueSplitter
 # -----------------------------
 class RevenueSplitter:
     """
-    Integrated engine that consumes the Viewer Activity analyzer's
-    Engagement Integrity Score (EIS) to weight raw engagement units.
-
     Two APIs:
 
     1) compute_units(run_day) -> Dict[creator_id, float]
-       Returns per-creator units for that day using Value Units formula:
-       raw_units * (EIS/100)**2 * early_kicker_mult, then applies creator trust
-       and likely-bot exclusion.
+       Returns per-creator "units" for that day (after all per-video multipliers
+       AND after creator-level integrity multiplier + trust/bot), no writes.
 
     2) run(pool_cents, run_day, payment_type="revenue_split")
        Scales the day's units to cents, applies KYC caps + redistribution,
@@ -254,45 +291,6 @@ class RevenueSplitter:
     def __init__(self, sb: Client, dry_run: bool = False):
         self.sb = sb
         self.dry_run = dry_run
-
-    # ---------- Helper: authoritative EIS for a video over [start,end) ----------
-    def _get_video_eis(self, video_id: int, start: datetime, end: datetime) -> float:
-        """
-        Fetch average EIS from `video_aggregates` for the given window. If none
-        found, compute on-demand via viewer_activity.analyzer.analyze_window.
-        Returns a float in [0,100].
-        """
-        try:
-            res = (
-                self.sb.table("video_aggregates")
-                .select("avg(eis)")
-                .eq("video_id", int(video_id))
-                .gte("window_start", start.isoformat())
-                .lt("window_end", end.isoformat())
-                .execute()
-            )
-            rows = res.data or []
-            avg_eis = None
-            if rows:
-                # Supabase returns aggregate column as "avg" or "avg_eis" depending on SQL builder
-                avg_eis = rows[0].get("avg") or rows[0].get("avg_eis")
-            if avg_eis is not None:
-                try:
-                    val = float(avg_eis)
-                    return max(0.0, min(100.0, val))
-                except Exception:
-                    pass
-        except Exception:
-            # Swallow read errors; fallback to on-demand computation
-            pass
-
-        try:
-            payload = analyze_window(video_id, start, end)
-            val = float(payload.get("eis", 0.0))
-            return max(0.0, min(100.0, val))
-        except Exception:
-            # As a last resort, neutral EIS
-            return 50.0
 
     # ---------- compute units for a day (no DB writes) ----------
     def compute_units(self, run_day: date) -> Dict[int, float]:
@@ -308,47 +306,81 @@ class RevenueSplitter:
             if vid is not None:
                 per_video_events[vid].append(e)
 
-        # Basic per-video stats and raw units
+        # Engagement rates for quality z
+        eng_rates: List[float] = []
         per_video_stats: Dict[int, dict] = {}
         for vid, evs in per_video_events.items():
             c = Counter(e["event_type"] for e in evs)
-            stats = {
-                "views": c.get("view", 0),
-                "likes": c.get("like", 0),
-                "comments": c.get("comment", 0),
-                "shares": c.get("share", 0),
-            }
-            per_video_stats[vid] = stats
+            views = c.get("view", 0)
+            likes = c.get("like", 0)
+            comments = c.get("comment", 0)
+            shares = c.get("share", 0)
+            er = 0.0 if views == 0 else (likes + comments + shares) / views
+            eng_rates.append(er)
+            per_video_stats[vid] = {"views": views, "likes": likes, "comments": comments, "shares": shares, "eng_rate": er}
 
-        # Per-creator value units using EIS
-        start_dt, end_dt = daterange_utc(run_day)
+        mu = sum(eng_rates) / len(eng_rates) if eng_rates else 0.0
+        sigma = math.sqrt(sum((x - mu) ** 2 for x in eng_rates) / (len(eng_rates) - 1)) if len(eng_rates) > 1 else 0.0
+
+        # Per-creator raw units (after per-video multipliers)
         per_creator_units: Dict[int, float] = defaultdict(float)
         for vid, stats in per_video_stats.items():
             vrow = videos.get(vid)
             if not vrow:
                 continue
             cid = vrow["creator_id"]
-
             raw_units = (
                 EVENT_WEIGHTS["view"]    * stats["views"] +
                 EVENT_WEIGHTS["like"]    * stats["likes"] +
                 EVENT_WEIGHTS["comment"] * stats["comments"] +
                 EVENT_WEIGHTS["share"]   * stats["shares"]
             )
-
-            eis = self._get_video_eis(vid, start_dt, end_dt)
-            eis_mult = (eis / 100.0) ** 2.0
+            q_mult = quality_multiplier(stats["eng_rate"], mu, sigma)
             ev_mult = early_kicker_mult_for_video(self.sb, vrow)
-
-            per_creator_units[cid] += raw_units * eis_mult * ev_mult
+            cl_mult = cluster_penalty_mult(per_video_events[vid])
+            per_creator_units[cid] += raw_units * q_mult * ev_mult * cl_mult
 
         if not per_creator_units:
             return {}
 
-        # Apply stored creator trust score and likely_bot hard-exclude
+        # Integrity multiplier (7d window ending run_day)
+        eis_start = datetime.combine(run_day, datetime.min.time(), tzinfo=timezone.utc) - timedelta(days=7)
+        eis_end   = datetime.combine(run_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        events_7d = load_events_between(self.sb, eis_start, eis_end)
+
+        # Build creator stats for 7d
+        creator_7d: Dict[int, dict] = defaultdict(lambda: {"views":0,"likes":0,"comments":0,"devs":set(),"ips":set()})
+        video_to_creator = {vid: v["creator_id"] for vid, v in videos.items()}
+
+        for e in events_7d:
+            vid = e.get("video_id")
+            if vid not in video_to_creator:
+                continue
+            cid = video_to_creator[vid]
+            et  = e.get("event_type")
+            if et == "view":      creator_7d[cid]["views"] += 1
+            elif et == "like":    creator_7d[cid]["likes"] += 1
+            elif et == "comment": creator_7d[cid]["comments"] += 1
+            if e.get("device_id") is not None: creator_7d[cid]["devs"].add(e["device_id"])
+            if e.get("ip_hash")   is not None: creator_7d[cid]["ips"].add(e["ip_hash"])
+
+        # Apply integrity multiplier (±3%)
+        units_after_integrity: Dict[int, float] = {}
+        for cid, units in per_creator_units.items():
+            s = creator_7d.get(cid, {"views":0,"likes":0,"comments":0,"devs":set(),"ips":set()})
+            integ = integrity_multiplier_7d(
+                views=s["views"],
+                uniq_dev=len(s["devs"]),
+                uniq_ip=len(s["ips"]),
+                likes=s["likes"],
+                comments=s["comments"]
+            )
+            units_after_integrity[cid] = units * integ
+
+        # Apply stored creator trust score (±10%) and likely_bot hard-exclude
         users_by_id = load_users(self.sb)
         units_after_creator_score: Dict[int, float] = {}
-        for cid, units in per_creator_units.items():
+        for cid, units in units_after_integrity.items():
             urow = users_by_id.get(cid, {}) or {}
             if PENALIZE_LIKELY_BOT and urow.get("likely_bot"):
                 mult = 0.0  # hard exclude suspicious creators entirely
@@ -415,4 +447,3 @@ class RevenueSplitter:
             print(f"[info] {unallocated} cents remained unallocated due to KYC caps.", flush=True)
 
         return breakdown
-

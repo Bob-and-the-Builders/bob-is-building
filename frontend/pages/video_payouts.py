@@ -30,14 +30,12 @@ def resolve_creator_id(sb: Client, user: dict) -> int | None:
     return None
 
 def _to_display_dt(val, tz="UTC"):
-    # returns a tz-aware pandas.Timestamp or pd.NaT
     if val is None:
         return pd.NaT
-    # strings like "None", "", "NaT"
     s = str(val).strip()
     if s == "" or s.lower() in ("none", "nat", "nan"):
         return pd.NaT
-    # parse anything pandas understands (ISO with/without microseconds, +00:00 etc.)
+    # Parse anything pandas understands; coerce invalid -> NaT
     ts = pd.to_datetime(s, utc=True, errors="coerce")
     return ts  # tz-aware or NaT
 
@@ -91,8 +89,11 @@ if not transactions_df.empty:
         transactions_df["amount_cents"] = 0
     transactions_df["amount_cents"] = pd.to_numeric(transactions_df["amount_cents"], errors="coerce").fillna(0)
 
-    inflow_cents = transactions_df.loc[transactions_df["direction"].eq("inflow"), "amount_cents"].sum() if "direction" in transactions_df.columns else 0
-    outflow_cents = transactions_df.loc[transactions_df["direction"].eq("outflow"), "amount_cents"].sum() if "direction" in transactions_df.columns else 0
+    if "direction" in transactions_df.columns:
+        inflow_cents = transactions_df.loc[transactions_df["direction"].eq("inflow"), "amount_cents"].sum()
+        outflow_cents = transactions_df.loc[transactions_df["direction"].eq("outflow"), "amount_cents"].sum()
+    else:
+        inflow_cents = outflow_cents = 0
     net_balance_cents = int(inflow_cents - outflow_cents)
 else:
     inflow_cents = outflow_cents = net_balance_cents = 0
@@ -134,16 +135,15 @@ if not transactions_df.empty:
     # Dates: parse & sort, then produce clean string (handles NULLs)
     if "created_at" in display_df.columns:
         display_df["__dt"] = display_df["created_at"].apply(_to_display_dt)
-        # Sort by true datetime (NaT sorts last)
         display_df = display_df.sort_values("__dt", ascending=False)
-        # Format for UI (UTC, no microseconds, no tz suffix)
-        display_df["Date"] = display_df["__dt"].dt.tz_convert("UTC").dt.tz_localize(None).dt.strftime("%Y-%m-%d %H:%M:%S")
-        # Replace any remaining NaN/NaT display with a dash
+        # For display: strip tz suffix; NaT -> "—"
+        dt_series = display_df["__dt"]
+        # Only tz-convert where not NaT; avoid errors
+        display_df["Date"] = dt_series.dt.tz_convert("UTC").dt.tz_localize(None).dt.strftime("%Y-%m-%d %H:%M:%S")
         display_df["Date"] = display_df["Date"].fillna("—")
     else:
         display_df["Date"] = "—"
 
-    # Only show the clean Date (do NOT show raw created_at)
     cols = [c for c in ["Date", "Amount (USD)", "direction", "payment_type", "status"] if c in display_df.columns]
     st.dataframe(
         display_df[cols].reset_index(drop=True),
@@ -189,29 +189,41 @@ else:
     st.info("Minimum withdrawal is $5.00.")
     amount_to_withdraw = 0.00
 
-if st.button("Request Payout", disabled=not can_withdraw):
-    try:
-        amount_cents = int(round(amount_to_withdraw * 100))
-        # Optional KYC checks
-        kyc_level = (supabase.table("users").select("kyc_level")
-                     .eq("id", creator_id).single().execute().data or {}).get("kyc_level", 0)
+# NOTE: disable button if cannot withdraw
+if st.button("Request Payout", disabled=(not can_withdraw)):
+    amount_cents = int(round(amount_to_withdraw * 100))
+    if amount_cents <= 0:
+        st.warning("Amount must be greater than $0.")
+        st.stop()
 
-        if kyc_level == 2 and amount_cents >= 50000:
-            st.warning("Payouts of $500+ require KYC Level 3.")
-        elif kyc_level == 1 and amount_cents >= 10000:
-            st.warning("Payouts of $100+ require KYC Level 2.")
-        else:
-            supabase.table("transactions").insert({
-                "recipient": creator_id,
-                "amount_cents": amount_cents,
-                "payment_type": payment_method,
-                "direction": "outflow",
-                "status": "pending",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-            st.success(f"Payout request for ${amount_to_withdraw:,.2f} submitted.")
-            get_payout_data.clear()
-            st.session_state["_tx_refresh"] += 1
-            st.rerun()
+    # Optional KYC checks (using creator_id)
+    try:
+        res = supabase.table("users").select("kyc_level").eq("id", creator_id).single().execute()
+        kyc_level = (res.data or {}).get("kyc_level", 0)
+    except Exception:
+        kyc_level = 0
+
+    if kyc_level == 1 and amount_cents >= 10_000:
+        st.warning("Payouts of $100+ require KYC Level 2.")
+        st.stop()
+    if kyc_level == 2 and amount_cents >= 50_000:
+        st.warning("Payouts of $500+ require KYC Level 3.")
+        st.stop()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        supabase.table("transactions").insert({
+            "created_at": now_iso,
+            "recipient": int(creator_id),     # numeric users.id
+            "amount_cents": amount_cents,
+            "payment_type": payment_method,   # "bank_transfer" | "card" | "wallet" | "paypal"
+            "direction": "outflow",           # payout request
+            "status": "pending",
+        }).execute()
+        st.success(f"Your payout request for ${amount_to_withdraw:,.2f} has been submitted.")
+        # Refresh cached data so the new row appears immediately
+        get_payout_data.clear()
+        st.session_state["_tx_refresh"] += 1
+        st.rerun()
     except Exception as e:
-        st.error(f"Could not submit payout request: {e}")
+        st.error(f"Could not create payout request: {e}")
