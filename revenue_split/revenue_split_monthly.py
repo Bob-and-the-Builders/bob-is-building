@@ -6,6 +6,13 @@ import calendar
 from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
 
+# require additional .env data, POOL_CENTS, YEAR, MONTH
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # loads .env into os.environ
+except Exception:
+    pass
+
 # Robust import (module or script)
 try:
     from revenue_split.revenue_split import RevenueSplitter, make_client, apply_kyc_caps
@@ -70,7 +77,7 @@ def main():
     for d in range(1, last_day + 1):
         start_iso, end_iso = day_bounds_utc(year, month, d)
         cnt = (
-            sb.table("event").select("id", count="exact")
+            sb.table("event").select("event_id", count="exact")
             .gte("ts", start_iso).lt("ts", end_iso).execute()
         ).count or 0
         if verbose:
