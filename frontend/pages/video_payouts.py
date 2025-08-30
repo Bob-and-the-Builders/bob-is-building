@@ -43,11 +43,7 @@ def get_payout_data(user_id: int):
             # If the column does not exist or call fails, we will compute a fallback below
             current_balance_cents = 0
 
-<<<<<<< HEAD
         # Fetch all transactions for the creator from 'transactions' table using 'user_id'
-=======
-        # Fetch all transactions for the creator from 'transactions' table using 'recipient'
->>>>>>> b0d6446 (fixed again)
         tx_resp = supabase.table("transactions").select("*").eq("recipient", user_id).execute()
         transactions = tx_resp.data or []
         transactions_df = pd.DataFrame(transactions)
@@ -148,18 +144,43 @@ st.write("---")
 st.subheader("Request a Payout")
 st.write(f"Your current available balance for withdrawal is **${balance_cents / 100:,.2f}**.")
 
+# New: payout method selector
+payment_method = st.selectbox(
+    "Payout method",
+    options=["bank_transfer", "card", "wallet", "paypal"],
+    index=0,
+    help="Choose where we should send your payout."
+)
 
 amount_to_withdraw = st.number_input(
     label="Amount to withdraw (USD)",
     min_value=5.00,
     max_value=float(balance_cents / 100),
-    value=max(5.00, float(balance_cents / 100)), # Default to max available or $5
+    value=max(5.00, float(balance_cents / 100)),  # Default to max available or $5
     step=5.00,
     format="%.2f",
-    disabled=(balance_cents < 500) # Disable if balance is less than $5
+    disabled=(balance_cents < 500)  # Disable if balance is less than $5
 )
+
 if st.button("Request Payout", disabled=(balance_cents < 500)):
-    # In a real app, this is where you would trigger a Supabase Edge Function
-    # or an API call to your backend to process the payout.
     st.success(f"Your payout request for ${amount_to_withdraw:,.2f} has been submitted for processing!")
-   
+    amount_cents = int(amount_to_withdraw * 100)
+    curr_user = st.session_state.get("user")
+    email = getattr(user, "email", None)
+    res = supabase.table("user_info").select("user_id").eq("email", email).single().execute()
+    curr_user_id = res.data.get("user_id") if res.data else None
+    res = supabase.table("users").select("kyc_level").eq("id", user_id).single().execute()
+    kyc_level = res.data.get("kyc_level") if res.data else 0
+
+    if kyc_level == 2 and amount_cents >= 50000:
+        st.warning("Payouts of $500 or more require KYC Level 3 verification. Please complete KYC Level 3 to proceed.")
+    elif kyc_level == 1 and amount_cents >= 10000:
+        st.warning("Payouts of $100 or more require KYC Level 2 verification. Please complete KYC Level 2 to proceed.")
+    else:
+        supabase.table("transactions").insert({
+            "recipient": curr_user_id,
+            "amount_cents": amount_cents,
+            "payment_type": payment_method,
+            "status": "pending"
+        }).execute()
+        st.info("Payout request submitted. It may take a few days to process.")
