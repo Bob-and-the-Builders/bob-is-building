@@ -1,4 +1,4 @@
-from supabase_manager import client
+from .supabase_manager import client
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 import math
@@ -275,4 +275,33 @@ def authentic_engagement(features: Dict[str, float]) -> float:
 
 def eis_score(ae: float, cq: float, li: float, rc: float) -> float:
     # Weighted blend
-    return float(max(0.0, min(100.0, 0.4 * ae + 0.25 * cq + 0.2 * li + 0.15 * rc)))
+    return float(max(0.0, min(100.0, 0.4 * ae + 0.30 * cq + 0.15 * li + 0.15 * rc)))
+
+def get_creator_trust_score(creator_id: int) -> float:
+    """Compute Creator Trust Score (CTS) from recent videos' EIS.
+
+    Pull the 10 most recently updated videos for the creator ordered by
+    `eis_updated_at` descending, take the average of `eis_current` and
+    clamp the result to [0, 100].
+
+    Returns 50.0 on missing data or any database error.
+    """
+    try:
+        if creator_id is None:
+            return 50.0
+        res = (
+            client.table("videos")
+            .select("eis_current,eis_updated_at")
+            .eq("creator_id", creator_id)
+            .order("eis_updated_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        rows = (res.data or []) if res else []
+        scores = [float(r.get("eis_current")) for r in rows if r.get("eis_current") is not None]
+        if not scores:
+            return 50.0
+        avg = sum(scores) / len(scores)
+        return float(max(0.0, min(100.0, avg)))
+    except Exception:
+        return 50.0

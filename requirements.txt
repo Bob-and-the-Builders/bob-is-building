@@ -4,3 +4,4 @@ python-dotenv
 requests
 moviepy
 Faker
+phonenumbers
