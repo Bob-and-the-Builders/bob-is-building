@@ -168,6 +168,28 @@ def main():
 
         # Report Credibility (critical below 70)
         if rc_val < 70:
+            # Pull rich debug info when available (from viewer_activity analyzer)
+            rc_details = breakdown.get("report_cleanliness", {}) or {}
+            rc_count = rc_details.get("report_count")
+            rc_avg_vts = rc_details.get("avg_reporter_vts")
+            rc_penalty = rc_details.get("penalty")
+            rc_reporters = rc_details.get("reporters") or []
+            # Show up to 3 sample reporters with VTS
+            sample = ", ".join(
+                [
+                    f"{str(r.get('user_id'))}: {float(r.get('vts') or 0.0):.1f}"
+                    for r in rc_reporters[:3]
+                ]
+            ) or "None"
+            details_lines = [
+                f"Report Credibility score is {rc_val:.1f} (threshold 70).",
+                f"Reports: {rc_count if rc_count is not None else 'N/A'}",
+                f"Avg reporter VTS: {rc_avg_vts:.1f}" if isinstance(rc_avg_vts, (int, float)) else "Avg reporter VTS: N/A",
+                f"Penalty applied: {rc_penalty:.2f}" if isinstance(rc_penalty, (int, float)) else "Penalty applied: N/A",
+                f"Sample reporters (user_id: VTS): {sample}",
+            ]
+            details_text = "\n".join(details_lines)
+
             anomalies.append(
                 {
                     "title": "Elevated Report Credibility",
@@ -178,9 +200,7 @@ def main():
                     "recommendation": (
                         "Review the content against policies, check community feedback, and consider edits, disclaimers, or takedown if warranted. Respond transparently if appropriate."
                     ),
-                    "details": (
-                        f"Report Credibility score is {rc_val:.1f} (threshold 70). Prioritize investigation since high-VTS reports carry greater weight."
-                    ),
+                    "details": details_text,
                     "severity": "alert",
                 }
             )
